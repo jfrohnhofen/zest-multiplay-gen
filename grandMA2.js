@@ -9,7 +9,17 @@
 function generateGrandMA2Xml(cues) {
   cues = cues ?? parseCuelist();
 
-  const midiCommands = [];
+  const midiCommands = [
+    // speed-master
+    { $index: 4, $note: 36, $channel: 10, $type: "exec", $exec: 1 },
+
+    // haze machines
+    { $index: 2, $note: 84, $channel: 11, $type: "exec", $exec: 5, $button_type: "fader" },
+    { $index: 0, $note: 42, $channel: 10, $type: "exec", $exec: 6 },
+    { $index: 3, $note: 85, $channel: 11, $type: "exec", $exec: 7, $button_type: "fader" },
+    { $index: 1, $note: 43, $channel: 10, $type: "exec", $exec: 8 },
+  ];
+
   for (const [idx, cue] of cues.entries()) {
     if (cue.tracks.lights) {
       midiCommands.push({

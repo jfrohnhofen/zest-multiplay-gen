@@ -263,7 +263,7 @@ const multiplay = XmlService.parse(`<?xml version="1.0" encoding="UTF-8"?>
     <Patch Name="grandMA2" DeviceName="LoopBe Internal MIDI" Enabled="-1"/>
   </MIDI>
   <Network>
-    <Patch Name="QLab" Destination="192.168.110.75" Adapter="{552E5721-8042-4E9E-ADE6-FB41CBDA4E0A}" Port="53000" Encoding="1" Enabled="-1"/>
+    <Patch Name="QLab" Destination="192.168.0.80" Adapter="{552E5721-8042-4E9E-ADE6-FB41CBDA4E0A}" Port="53000" Encoding="1" Enabled="-1"/>
   </Network>
   <Video/>
 </Production>`);

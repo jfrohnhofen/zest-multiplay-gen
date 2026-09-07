@@ -11,7 +11,7 @@ const OUTPUT_FOLDER = "14_x-YgxC_f4qcOL4cAtCpBEBBoDypu0z";
 const MULTIPLAY_LX_MIDI_PATCH = 0;
 
 // Audio channel index configured in MultiPlay for sound cues.
-const MULTIPLAY_SX_AUDIO_CHANNEL = 3;
+const MULTIPLAY_SX_AUDIO_CHANNEL = 1;
 
 // OSC patch index configured in MultiPlay for video cues (QLab).
 const MULTIPLAY_VX_OSC_PATCH = 0;
@@ -71,7 +71,7 @@ function parseCuelist() {
       cues.push(cue);
     }
   }
-
+  
   return cues;
 }
 
