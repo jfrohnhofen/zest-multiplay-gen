@@ -40,11 +40,11 @@ function generateMultiplay(cues) {
     let isPrimaryCue = true;
 
     // Lighting cues
-    if (cue.tracks.lights) {
+    if (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES) {
       // Trigger a grandMA2 cue via MIDI. The channel and MIDI note are derived from the cue index.
       // The MIDI Mapping for grandMA2 is generated using the same mapping.
       // Whenever the order of cues changes, both files should be re-generated.
-      addCue("LX", cue.tracks.lights.description, {
+      addCue("LX", cue.tracks.lights?.description || (MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES ? "PLACEHOLDER" : ""), {
         Type: 6,
         Patch: MULTIPLAY_LX_MIDI_PATCH,
         Msg: {

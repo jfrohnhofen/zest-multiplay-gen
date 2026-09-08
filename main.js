@@ -9,6 +9,7 @@ const OUTPUT_FOLDER = "14_x-YgxC_f4qcOL4cAtCpBEBBoDypu0z";
 
 // MIDI patch index configured in MultiPlay for lighting control (grandMA2).
 const MULTIPLAY_LX_MIDI_PATCH = 0;
+const MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES = true;
 
 // Audio channel index configured in MultiPlay for sound cues.
 const MULTIPLAY_SX_AUDIO_CHANNEL = 1;

@@ -21,15 +21,13 @@ function generateGrandMA2Xml(cues) {
   ];
 
   for (const [idx, cue] of cues.entries()) {
-    if (cue.tracks.lights) {
-      midiCommands.push({
-		    $index: midiCommands.length,
-        $channel: Math.trunc(idx / 128) + 1,
-        $note: idx % 128,
-        $type: "macro_line",
-        macro_line: `Goto Cue ${cue.cue}`,
-      });
-    }
+    midiCommands.push({
+      $index: midiCommands.length,
+      $channel: Math.trunc(idx / 128) + 1,
+      $note: idx % 128,
+      $type: "macro_line",
+      macro_line: `Goto Cue ${cue.cue}`,
+    });
   }
 
   const midiRemote = XmlService.createElement("MidiRemotes").setAttribute("index", 1);
