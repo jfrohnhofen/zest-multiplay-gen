@@ -1,7 +1,7 @@
 /**
  * Generates a MultiPlay production XML file (`<SHOW_NAME>.mpp`) containing all audio, lighting, and video cues.
  * 
- * Constructs MultiPlay cue objects (audio files, MIDI trigger commands for lights, OSC messages for video),
+ * Constructs MultiPlay cue objects (audio files, telnet commands for lights, OSC messages for video),
  * formats their advance triggers, audio channels, and patch assignments, and saves the output to Drive.
  */
 function generateMultiplay(cues) {
@@ -13,7 +13,7 @@ function generateMultiplay(cues) {
   // Keeps track of labels assigned to sound cues that may then be referenced by sound control cues (e.g. !stop, !fade-out).
   const soundLabels = new Map();
 
-  for (const [idx, cue] of cues.entries()) {
+  for (const cue of cues) {
 
     // Adds a single cue. One input cue (i.e. a single row in the input sheet) may corespond to multiple MultiPlay cues (e.g.
     // when a lighting and sound change are triggered in the same cue). In this case the first cue is the primary cue that displays
@@ -24,12 +24,12 @@ function generateMultiplay(cues) {
         // Ensures that this cue triggers with the previous cue (see above for details).
         multiplayCues[multiplayCues.length - 1].Advance.$Action = 2;
       }
-
+  
       multiplayCues.push({...params, ...{
           UID: nextUid++,
-          Q: isPrimaryCue ? cue.cue : "",
-          Description: `${abbr}   ` + (isPrimaryCue ? cue.description : descr || ""),
-          ScriptRef: isPrimaryCue ? `p${cue.pg || "??"} - ${cue.scene || ""} - ${cue.line || ""}` : "",
+          Q: isPrimaryCue ? `${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
+          ScriptRef: isPrimaryCue ? cue.description : "",
+          Description: abbr + (descr ? ` - ${descr}` : ""),
           Advance: { $Action: 1, $Target: 0 },
           Appearance: { $BGColour: "202020", $FontColour: "FFFFFF" },
       }});
@@ -40,19 +40,26 @@ function generateMultiplay(cues) {
     let isPrimaryCue = true;
 
     // Lighting cues
-    if (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES) {
-      // Trigger a grandMA2 cue via MIDI. The channel and MIDI note are derived from the cue index.
-      // The MIDI Mapping for grandMA2 is generated using the same mapping.
-      // Whenever the order of cues changes, both files should be re-generated.
-      addCue("LX", cue.tracks.lights?.description || (MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES ? "PLACEHOLDER" : ""), {
-        Type: 6,
-        Patch: MULTIPLAY_LX_MIDI_PATCH,
-        Msg: {
-          $Command: 1,
-          $Channel: Math.trunc(idx / 128),
-          $Data1: idx % 128,
-          $Data2: 127,
-        }
+    if (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES) {
+      // Trigger a grandMA2 cue via telnet.
+      addCue("LX", cue.tracks.lights ? cue.tracks.lights.description : "<placeholder>", {
+        Type: 13,
+        Patch: MULTIPLAY_LX_NETWORK_PATCH,
+        Messages: {
+          $Interval: 10,
+          Msg: [{
+            $Data: "login administrator admin",
+            $Format: 0,
+            $AddCR: -1,
+            $AddLF: -1,
+          },
+          {
+            $Data: `goto cue ${cue.cue}`,
+            $Format: 0,
+            $AddCR: -1,
+            $AddLF: -1,
+          }],
+        },
       });
     }
 
@@ -81,7 +88,7 @@ function generateMultiplay(cues) {
           File: {
             $Name: `${LOCAL_FOLDER}\\sound\\${cue.tracks.sound.file.name}`,
           },
-          AudioChannel: MULTIPLAY_SX_AUDIO_CHANNEL,
+          AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
         }, ...params});
       }
 
@@ -91,11 +98,11 @@ function generateMultiplay(cues) {
     }
 
     // Video cues
-    if (cue.tracks.video) {
+    if (cue.tracks.video || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES) {
       // Triggers a QLab cue by the same name / ID via OSC. The target IP / port can be set in the MultiPlay XML template.
-      addCue("VX", cue.tracks.video.description, {
+      addCue("VX", cue.tracks.video ? cue.tracks.video.description : "<placeholder>", {
         Type: 13,
-        Patch: MULTIPLAY_VX_OSC_PATCH,
+        Patch: MULTIPLAY_VX_NETWORK_PATCH,
         Messages: [{
           Msg: {
             $Data: `/cue/${cue.cue}/start`,
@@ -236,7 +243,7 @@ function parseParams(input, labels) {
 }
 
 /**
- * Base MultiPlay production XML template containing audio, MIDI, network patches.
+ * Base MultiPlay production XML template containing audio, network patches.
  */
 const multiplay = XmlService.parse(`<?xml version="1.0" encoding="UTF-8"?>
 <Production>
@@ -259,12 +266,10 @@ const multiplay = XmlService.parse(`<?xml version="1.0" encoding="UTF-8"?>
     <Patch Name="WING 3/4" DeviceName="OUT 3-4 (BEHRINGER WING-USB)" DeviceChans="1"/>
     <Patch Name="PC" DeviceName="Speakers (Focusrite USB Audio)" DeviceChans="1"/>
   </Audio>
-  <MIDI>
-    <Patch Name="grandMA2" DeviceName="LoopBe Internal MIDI" Enabled="-1"/>
-  </MIDI>
+  <MIDI/>
   <Network>
+    <Patch Name="grandMA2" Destination="127.0.0.1" Adapter="Local Host" Port="30000" Encoding="2" Enabled="-1"/>
     <Patch Name="QLab" Destination="192.168.0.80" Adapter="{552E5721-8042-4E9E-ADE6-FB41CBDA4E0A}" Port="53000" Encoding="1" Enabled="-1"/>
   </Network>
   <Video/>
 </Production>`);
-

@@ -7,15 +7,13 @@ const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\${SHOW_NAME}`;
 // Google Drive folder ID where generated output files and assets are stored.
 const OUTPUT_FOLDER = "14_x-YgxC_f4qcOL4cAtCpBEBBoDypu0z";
 
-// MIDI patch index configured in MultiPlay for lighting control (grandMA2).
-const MULTIPLAY_LX_MIDI_PATCH = 0;
-const MULTIPLAY_OUTPUT_LX_MIDI_PLACEHOLDER_CUES = true;
+// Patches configured in MultiPlay.
+const MULTIPLAY_LX_NETWORK_PATCH = 0;
+const MULTIPLAY_SX_AUDIO_PATCH = 1;
+const MULTIPLAY_VX_NETWORK_PATCH = 1;
 
-// Audio channel index configured in MultiPlay for sound cues.
-const MULTIPLAY_SX_AUDIO_CHANNEL = 1;
-
-// OSC patch index configured in MultiPlay for video cues (QLab).
-const MULTIPLAY_VX_OSC_PATCH = 0;
+const MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES = true;
+const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
 
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
@@ -83,7 +81,6 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("ZEST")
     .addItem("Generate MultiPlay file", "generateMultiplay")
-    .addItem("Generate grandMA2 MIDI XML", "generateGrandMA2Xml")
     .addItem("Bundle assets", "bundleAssets")
     .addItem("Everything Everywhere All at Once", "updateAll")
     .addToUi();
@@ -92,11 +89,10 @@ function onOpen() {
 /**
  * Master generator function ("Everything Everywhere All at Once").
  * Parses the cuelist once and triggers MultiPlay production generation,
- * grandMA2 MIDI XML generation, and asset bundling.
+ * and asset bundling.
  */
 function updateAll() {
   const cues = parseCuelist();
   generateMultiplay(cues);
-  generateGrandMA2Xml(cues);
   bundleAssets(cues);
 }
