@@ -1,4 +1,4 @@
-# zest-multiplay-gen
+# ZEST Multiplay Generator
 
 An automated Google Apps Script project for theatre productions that parses master cue list spreadsheets in Google Sheets and generates [MultiPlay](http://www.da-share.com/software/multiplay/) 3.0 production cue files (`.mpp`), network cues (grandMA2 telnet, QLab OSC), and organized Google Drive asset bundles.
 
