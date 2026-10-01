@@ -1,11 +1,11 @@
 // Name of the current show/production.
-const SHOW_NAME = "TGWDLM";
+const SHOW_NAME = "RENT";
 
 // Target local filesystem base directory path for show assets.
 const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\${SHOW_NAME}`;
 
 // Google Drive folder ID where generated output files and assets are stored.
-const OUTPUT_FOLDER = "14_x-YgxC_f4qcOL4cAtCpBEBBoDypu0z";
+const OUTPUT_FOLDER = "1_yVMIcbWtE49IguFixpRchhYeve1zBwg";
 
 // Patches configured in MultiPlay.
 const MULTIPLAY_LX_NETWORK_PATCH = 0;
