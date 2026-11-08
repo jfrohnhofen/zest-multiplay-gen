@@ -82,11 +82,11 @@ class Context {
   }
 
   warn(msg) {
-    this.#add("warning", msg);
+    this._add("warning", msg);
   }
 
   err(msg) {
-    this.#add("error", msg);
+    this._add("error", msg);
   }
 
   /** Records an error if `cond` is falsy. Returns `cond` so callers can write `if (!ctx.check(...)) continue;`. */
@@ -120,7 +120,7 @@ class Context {
     return summary;
   }
 
-  #add(severity, msg) {
+  _add(severity, msg) {
     const where = [
       this.row != null ? `row ${this.row}` : null,
       this.cue != null ? `cue ${this.cue}` : null,
