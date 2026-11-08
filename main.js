@@ -21,8 +21,14 @@ const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
  * Column headers dictate property names. Headers with newline characters are split into track and property
  * (e.g. `sound\nfile` maps to `cue.tracks.sound.file`).
  * Handles rich link smart chips by extracting their URI and display name.
+ *
+ * Each cue carries the sheet row it was parsed from (`cue.row`, 1-based, including the header row).
+ *
+ * Warnings and errors are logged via a "parse" context before returning. Returns an empty array if there were any
+ * errors, so that the generators have nothing to do and leave existing output untouched.
  */
 function parseCuelist() {
+  const ctx = new Context("parse");
   // 1. Read content of the active sheet of the spreadsheet.
   const id = SpreadsheetApp.getActiveSpreadsheet().getId();
   const sheetName = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet().getName();
@@ -50,7 +56,7 @@ function parseCuelist() {
 
   // 3. Parse each row as a cue.
   let cues = [];
-  for (const row of rows) {
+  for (const [rowIndex, row] of rows.entries()) {
     cue = { tracks: {} };
     const values = row.values.map(x => x.chipRuns ? { uri: x.chipRuns[0].chip.richLinkProperties.uri, name: x.formattedValue.trim() } : x.formattedValue);
     for (const [i, value] of values.entries()) {
@@ -66,12 +72,16 @@ function parseCuelist() {
       }
     }
 
+    // +2: skip the header row, and sheet rows are 1-based.
+    cue.row = rowIndex + 2;
+
     if (cue.cue) {
       cues.push(cue);
     }
   }
   
-  return cues;
+  ctx.report();
+  return ctx.hasErrors() ? [] : cues;
 }
 
 /**

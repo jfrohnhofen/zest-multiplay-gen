@@ -7,6 +7,11 @@
  */
 function bundleAssets(cues) {
   cues = cues ?? parseCuelist();
+  if (cues.length === 0) {
+    // Nothing to generate (empty sheet or parse errors). Bail out so existing output is not overwritten / wiped.
+    console.warn("[assets] no cues, nothing to do");
+    return;
+  }
 
   const outputFolder = DriveApp.getFolderById(OUTPUT_FOLDER);
   const subfolders = outputFolder.getFolders();

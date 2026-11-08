@@ -6,6 +6,11 @@
  */
 function generateMultiplay(cues) {
   cues = cues ?? parseCuelist();
+  if (cues.length === 0) {
+    // Nothing to generate (empty sheet or parse errors). Bail out so existing output is not overwritten / wiped.
+    console.warn("[multiplay] no cues, nothing to do");
+    return;
+  }
 
   let nextUid = 1;
   let multiplayCues = [];
