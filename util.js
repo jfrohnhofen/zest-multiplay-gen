@@ -74,10 +74,10 @@ class Context {
     this.cue = null;
   }
 
-  /** Sets the sheet row and cue id that subsequent messages refer to. Call with no arguments to clear. */
-  at(row = null, cue = null) {
-    this.row = row;
-    this.cue = cue;
+  /** Sets the cue (see `parseCuelist`) whose row and cue id subsequent messages refer to. Call with no arguments to clear. */
+  at(cue = null) {
+    this.row = cue?.row ?? null;
+    this.cue = cue?.cue || null;
     return this;
   }
 

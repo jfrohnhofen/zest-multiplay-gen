@@ -15,9 +15,6 @@ const MULTIPLAY_VX_NETWORK_PATCH = 1;
 const MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES = true;
 const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
 
-// Plain columns (i.e. without a track prefix) that are used by the generators.
-const KNOWN_COLUMNS = new Set(["cue", "pg", "scene", "line", "description"]);
-
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
  * 
@@ -50,14 +47,12 @@ function parseCuelist() {
   const invalidColumns = new Set();
   let tracks = new Set();
   for (const [i, header] of headers.entries()) {
-    ctx.at(1);
+    ctx.at({ row: 1 });
     if (header.length > 2) {
       ctx.err(`invalid header "${header.join("\\n")}", expected "<property>" or "<track>\\n<property>"`);
       invalidColumns.add(i);
     } else if (header.length > 1) {
       tracks.add(header[0]);
-    } else if (!KNOWN_COLUMNS.has(header[0])) {
-      ctx.warn(`unknown column "${header[0]}" is not used`);
     }
   }
   ctx.at();
@@ -93,11 +88,11 @@ function parseCuelist() {
       continue;
     }
     if (!cue.cue) {
-      ctx.at(cue.row).err("missing cue id (use N/A to ignore the row)");
+      ctx.at(cue).err("missing cue id (use N/A to ignore the row)");
       continue;
     }
 
-    ctx.at(cue.row, cue.cue);
+    ctx.at(cue);
     if (cueRows.has(cue.cue)) {
       ctx.err(`duplicate cue id (first used in row ${cueRows.get(cue.cue)})`);
     } else {
