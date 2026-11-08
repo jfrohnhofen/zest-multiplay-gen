@@ -56,7 +56,7 @@ function parseCuelist() {
     }
   }
   ctx.at();
-  console.log("Found cues for", [...tracks].join(", "));
+  console.log(`[parse] found tracks: ${[...tracks].join(", ")}`);
 
   // 3. Parse each row as a cue.
   let cues = [];

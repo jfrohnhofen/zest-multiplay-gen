@@ -102,7 +102,7 @@ class Context {
   }
 
   /**
-   * Logs all issues to the console and returns a one-line summary (e.g. "parse: 2 errors, 1 warning").
+   * Logs all issues to the console and returns a one-line summary (e.g. "[parse] 2 errors, 1 warning").
    * If there are errors, `onErrors` (e.g. "output not updated") is appended to the summary.
    */
   report(onErrors = null) {
@@ -113,8 +113,8 @@ class Context {
     const count = severity => this.issues.filter(x => x.severity === severity).length;
     const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
     const summary = this.issues.length === 0
-      ? `${this.phase}: ok`
-      : `${this.phase}: ${plural(count("error"), "error")}, ${plural(count("warning"), "warning")}`
+      ? `[${this.phase}] ok`
+      : `[${this.phase}] ${plural(count("error"), "error")}, ${plural(count("warning"), "warning")}`
         + (onErrors && this.hasErrors() ? ` - ${onErrors}` : "");
     console.log(summary);
     return summary;
@@ -124,7 +124,7 @@ class Context {
     const where = [
       this.row != null ? `row ${this.row}` : null,
       this.cue != null ? `cue ${this.cue}` : null,
-    ].filter(x => x != null).join(", ");
+    ].filter(x => x != null).join(" / ");
     const text = `[${this.phase}] ${where ? `${where}: ` : ""}${msg}`;
     this.issues.push({severity, row: this.row, cue: this.cue, msg, text});
   }
