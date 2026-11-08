@@ -1,9 +1,12 @@
 /**
  * Bundles cue assets by organizing referenced Google Drive files into output subfolders.
  * 
- * First clears any existing subfolders in the target Google Drive output directory (`OUTPUT_FOLDER`).
- * Then iterates through all parsed cues and creates Drive shortcuts to referenced track asset files
- * within corresponding track subfolders (e.g. sound, video), ensuring each file is only linked once per track.
+ * First collects the Drive files referenced by all parsed cues, ensuring each file is only linked once per track.
+ * Problems (e.g. a file that is not a Drive link) are reported to an "assets" context. If there are any errors, or
+ * nothing to bundle, the existing output is left untouched.
+ *
+ * Otherwise clears any existing subfolders in the target Google Drive output directory (`OUTPUT_FOLDER`) and creates
+ * Drive shortcuts to the files within corresponding track subfolders (e.g. sound, video).
  */
 function bundleAssets(cues) {
   cues = cues ?? parseCuelist();
@@ -13,34 +16,50 @@ function bundleAssets(cues) {
     return;
   }
 
+  const ctx = new Context("assets");
+
+  // Collects the ids of the Drive files to link for each track (e.g. sound, video), without touching Drive yet.
+  const tracks = new Map();
+  for (const cue of cues) {
+    ctx.at(cue);
+    for (const track in cue.tracks) {
+      const file = cue.tracks[track].file;
+      if (file == null) {
+        continue;
+      }
+
+      const id = file.uri?.match(/[-\w]{25,}/)?.[0];
+      if (!ctx.check(id != null, `${track} file "${file.name ?? file}" is not a link to a Google Drive file`)) {
+        continue;
+      }
+
+      if (!tracks.has(track)) {
+        tracks.set(track, new Set());
+      }
+      tracks.get(track).add(id);
+    }
+  }
+  ctx.at();
+
+  if (tracks.size === 0) {
+    ctx.warn("no files to bundle, nothing to do");
+  }
+  ctx.report();
+  if (ctx.hasErrors() || tracks.size === 0) {
+    // Do not wipe the existing output.
+    return;
+  }
+
   const outputFolder = DriveApp.getFolderById(OUTPUT_FOLDER);
   const subfolders = outputFolder.getFolders();
   while (subfolders.hasNext()) {
     subfolders.next().setTrashed(true);
   }
 
-  const tracks = {};
-  for (const cue of cues) {
-    for (const track in cue.tracks) {
-      const file = cue.tracks[track].file;
-      const id = file?.uri?.match(/[-\w]{25,}/)?.[0];
-      if (id == null) {
-        continue;
-      }
-
-      if (tracks[track] == null) {
-        tracks[track] = {
-          folder: outputFolder.createFolder(track),
-          seen: new Set(),
-        };
-      }
-      const folder = tracks[track].folder;
-      
-      if (!tracks[track].seen.has(id)) {
-        tracks[track].seen.add(id);
-        folder.createShortcut(id);
-      }
+  for (const [track, ids] of tracks) {
+    const folder = outputFolder.createFolder(track);
+    for (const id of ids) {
+      folder.createShortcut(id);
     }
   }
 }
-
