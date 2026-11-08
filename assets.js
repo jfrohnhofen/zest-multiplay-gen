@@ -10,8 +10,9 @@
  */
 function bundleAssets(cues) {
   cues = cues ?? parseCuelist();
+  if (cues == null) return; // parse errors already reported
   if (cues.length === 0) {
-    // Nothing to generate (empty sheet or parse errors). Bail out so existing output is not overwritten / wiped.
+    // Nothing to generate (empty sheet). Bail out so existing output is not overwritten / wiped.
     console.warn("[assets] no cues, nothing to do");
     return;
   }

@@ -24,8 +24,8 @@ const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
  *
  * Each cue carries the sheet row it was parsed from (`cue.row`, 1-based, including the header row).
  *
- * Warnings and errors are logged via a "parse" context before returning. Returns an empty array if there were any
- * errors, so that the generators have nothing to do and leave existing output untouched.
+ * Warnings and errors are logged via a "parse" context before returning. Returns null if there were any
+ * errors, so that the generators do not run and leave existing output untouched.
  */
 function parseCuelist() {
   const ctx = new Context("parse");
@@ -43,20 +43,17 @@ function parseCuelist() {
   rows = rows.slice(1);
 
   // 2. Determine types of cues (e.g. lights, video, led, sound). Each type may have columns with the same prefix (e.g. "lights\ndescription").
-  // Columns with an invalid header are ignored.
-  const invalidColumns = new Set();
-  let tracks = new Set();
+  // Headers with more than two parts nest generically (e.g. "a\nb\nc" maps to `cue.tracks.a.b.c`).
+  const tracks = new Map(); // track -> set of its properties
   for (const [i, header] of headers.entries()) {
     ctx.at({ row: 1 });
-    if (header.length > 2) {
-      ctx.err(`invalid header "${header.join("\\n")}", expected "<property>" or "<track>\\n<property>"`);
-      invalidColumns.add(i);
-    } else if (header.length > 1) {
-      tracks.add(header[0]);
+    if (header.length > 1) {
+      if (!tracks.has(header[0])) tracks.set(header[0], new Set());
+      tracks.get(header[0]).add(header.slice(1).join("."));
     }
   }
   ctx.at();
-  console.log(`[parse] found tracks: ${[...tracks].join(", ")}`);
+  console.log(`[parse] found tracks: ${[...tracks].map(([track, props]) => `${track} (${[...props].join(", ")})`).join(", ")}`);
 
   // 3. Parse each row as a cue.
   let cues = [];
@@ -65,13 +62,17 @@ function parseCuelist() {
     let cue = { tracks: {} };
     const values = row.values.map(x => x.chipRuns ? { uri: x.chipRuns[0].chip.richLinkProperties.uri, name: x.formattedValue.trim() } : x.formattedValue);
     for (const [i, value] of values.entries()) {
-      if (value == null || invalidColumns.has(i)) {
+      if (value == null) {
         continue;
       }
       const header = headers[i];
       if (header.length > 1) {
-        cue.tracks[header[0]] = cue.tracks[header[0]] || {};
-        cue.tracks[header[0]][header[1]] = value;
+        // Nests generically: "<track>\n<a>\n<b>" maps to cue.tracks.<track>.<a>.<b>.
+        let target = cue.tracks;
+        for (const key of header.slice(0, -1)) {
+          target = target[key] = target[key] || {};
+        }
+        target[header.at(-1)] = value;
       } else {
         cue[header[0]] = value;
       }
@@ -83,12 +84,12 @@ function parseCuelist() {
       cue.cue = cue.cue.trim();
     }
 
-    // Rows with the cue id "N/A" are explicitly ignored. Any other row needs a cue id.
+    // Rows with the cue id "N/A" are explicitly ignored. Rows without a cue id are ignored with a warning.
     if (typeof cue.cue === "string" && cue.cue.toUpperCase() === "N/A") {
       continue;
     }
     if (!cue.cue) {
-      ctx.at(cue).err("missing cue id (use N/A to ignore the row)");
+      ctx.at(cue).warn("missing cue id, ignoring row (use n/a to silence this warning)");
       continue;
     }
 
@@ -102,9 +103,19 @@ function parseCuelist() {
     cues.push(cue);
   }
   ctx.at();
-  
-  ctx.report("output not updated");
-  return ctx.hasErrors() ? [] : cues;
+  console.log(`[parse] parsed ${cues.length} cue${cues.length === 1 ? "" : "s"}`);
+
+  ctx.report("parse errors, aborting");
+  return ctx.hasErrors() ? null : cues;
+}
+
+/** Converts a 0-based column index to a sheet column letter (0 -> A, 26 -> AA). */
+function columnLetter(i) {
+  let letters = "";
+  for (i += 1; i > 0; i = Math.floor((i - 1) / 26)) {
+    letters = String.fromCharCode(65 + (i - 1) % 26) + letters;
+  }
+  return letters;
 }
 
 /**
