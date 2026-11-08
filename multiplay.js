@@ -132,7 +132,7 @@ function generateMultiplay(cues) {
   }
   ctx.at();
 
-  ctx.report();
+  ctx.report("output not updated");
   if (ctx.hasErrors()) {
     // Do not overwrite the existing file with an incomplete / broken one.
     return;

@@ -44,7 +44,7 @@ function bundleAssets(cues) {
   if (tracks.size === 0) {
     ctx.warn("no files to bundle, nothing to do");
   }
-  ctx.report();
+  ctx.report("output not updated");
   if (ctx.hasErrors() || tracks.size === 0) {
     // Do not wipe the existing output.
     return;

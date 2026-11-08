@@ -101,8 +101,11 @@ class Context {
     return this.issues.some(x => x.severity === "error");
   }
 
-  /** Logs all issues to the console and returns a one-line summary (e.g. "parse: 2 errors, 1 warning"). */
-  report() {
+  /**
+   * Logs all issues to the console and returns a one-line summary (e.g. "parse: 2 errors, 1 warning").
+   * If there are errors, `onErrors` (e.g. "output not updated") is appended to the summary.
+   */
+  report(onErrors = null) {
     for (const {severity, text} of this.issues) {
       (severity === "error" ? console.error : console.warn)(text);
     }
@@ -111,7 +114,8 @@ class Context {
     const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
     const summary = this.issues.length === 0
       ? `${this.phase}: ok`
-      : `${this.phase}: ${plural(count("error"), "error")}, ${plural(count("warning"), "warning")}`;
+      : `${this.phase}: ${plural(count("error"), "error")}, ${plural(count("warning"), "warning")}`
+        + (onErrors && this.hasErrors() ? ` - ${onErrors}` : "");
     console.log(summary);
     return summary;
   }

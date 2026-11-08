@@ -62,7 +62,7 @@ function parseCuelist() {
   let cues = [];
   const cueRows = new Map();
   for (const [rowIndex, row] of rows.entries()) {
-    cue = { tracks: {} };
+    let cue = { tracks: {} };
     const values = row.values.map(x => x.chipRuns ? { uri: x.chipRuns[0].chip.richLinkProperties.uri, name: x.formattedValue.trim() } : x.formattedValue);
     for (const [i, value] of values.entries()) {
       if (value == null || invalidColumns.has(i)) {
@@ -103,7 +103,7 @@ function parseCuelist() {
   }
   ctx.at();
   
-  ctx.report();
+  ctx.report("output not updated");
   return ctx.hasErrors() ? [] : cues;
 }
 
