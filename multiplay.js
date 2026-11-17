@@ -98,9 +98,11 @@ function generateMultiplay(cues) {
     }
 
     // Video cues
-    if (cue.tracks.video || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES) {
+    // A QLab cue exists iff any screen has a file or params (see generateQlab).
+    const hasVideo = Object.keys(QLAB_SCREENS).some(s => cue.tracks[s]?.file != null || cue.tracks[s]?.params != null);
+    if (hasVideo || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES) {
       // Triggers a QLab cue by the same name / ID via OSC. The target IP / port can be set in the MultiPlay XML template.
-      addCue("VX", cue.tracks.video ? cue.tracks.video.description : "<placeholder>", {
+      addCue("VX", hasVideo ? cue.tracks.video?.description : "<placeholder>", {
         Type: 13,
         Patch: MULTIPLAY_VX_NETWORK_PATCH,
         Messages: [{

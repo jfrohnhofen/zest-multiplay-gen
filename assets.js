@@ -23,16 +23,18 @@ function bundleAssets(cues) {
         continue;
       }
 
-      if (tracks[track] == null) {
-        tracks[track] = {
-          folder: outputFolder.createFolder(track),
+      // All video screens share one folder, matching QLAB_MEDIA_FOLDER on the QLab Mac.
+      const folderName = QLAB_SCREENS[track] ? QLAB_MEDIA_FOLDER : track;
+      if (tracks[folderName] == null) {
+        tracks[folderName] = {
+          folder: outputFolder.createFolder(folderName),
           seen: new Set(),
         };
       }
-      const folder = tracks[track].folder;
-      
-      if (!tracks[track].seen.has(id)) {
-        tracks[track].seen.add(id);
+      const folder = tracks[folderName].folder;
+
+      if (!tracks[folderName].seen.has(id)) {
+        tracks[folderName].seen.add(id);
         folder.createShortcut(id);
       }
     }

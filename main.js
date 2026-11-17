@@ -15,6 +15,22 @@ const MULTIPLAY_VX_NETWORK_PATCH = 1;
 const MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES = true;
 const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
 
+// QLab video screens. Keys are the (lower-case) first header line of the sheet's video columns: each screen has
+// a `<screen>\nfile` and a `<screen>\nparams` column. `stage` is the name of the QLab video stage it plays on.
+// For RENT this becomes e.g. { "sl screen": {...}, "sr screen": {...}, "projector": {...} }.
+const QLAB_SCREENS = {
+  "video": { stage: "Stage 2", label: "LED" },
+};
+
+// Name of the QLab cue list the generated script (re)creates. Anything in it is replaced on every run.
+const QLAB_CUE_LIST_NAME = "ZEST video";
+
+// Folder with the video / image files on the QLab Mac, relative to the workspace file (or an absolute path).
+const QLAB_MEDIA_FOLDER = "video";
+
+// Default fade-in / crossfade time in seconds when a cell has no $fade-dur.
+const QLAB_DEFAULT_FADE = 1;
+
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
  * 
@@ -81,6 +97,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("ZEST")
     .addItem("Generate MultiPlay file", "generateMultiplay")
+    .addItem("Generate QLab script", "generateQlab")
     .addItem("Bundle assets", "bundleAssets")
     .addItem("Everything Everywhere All at Once", "updateAll")
     .addToUi();
@@ -89,10 +106,11 @@ function onOpen() {
 /**
  * Master generator function ("Everything Everywhere All at Once").
  * Parses the cuelist once and triggers MultiPlay production generation,
- * and asset bundling.
+ * QLab script generation and asset bundling.
  */
 function updateAll() {
   const cues = parseCuelist();
   generateMultiplay(cues);
+  generateQlab(cues);
   bundleAssets(cues);
 }

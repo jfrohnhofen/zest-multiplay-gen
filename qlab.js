@@ -1,0 +1,374 @@
+/**
+ * Generates an AppleScript (`<SHOW_NAME>.applescript`) that builds the QLab video cue list.
+ *
+ * Writing a QLab workspace file directly is not feasible (it is an undocumented, nested binary plist with macOS
+ * file bookmarks inside). Instead, the generated script is run on the QLab Mac with the show workspace open. It
+ * deletes the previously generated cue list (named QLAB_CUE_LIST_NAME) and recreates it from scratch, so it can be
+ * re-run whenever the sheet changes.
+ *
+ * Every sheet row with video content becomes a group cue numbered like the sheet cue (e.g. `4`), which is what
+ * MultiPlay triggers via OSC `/cue/4/start`. The group fires all its children at once:
+ *   4-a  video / image / camera cue (starts at opacity 0 when it fades in)
+ *   4-b  fade cue: opacity 0 -> 1 over the fade duration
+ *   4-c  fade cue: fades out and stops whatever was showing on that screen before
+ *
+ * Each screen (stage) has its own pair of columns, configured in QLAB_SCREENS:
+ *   `<screen>\nfile`    file name or Drive smart chip, or `@camera` for a live camera cue
+ *   `<screen>\nparams`  one parameter / action per line (see parseVideoParams)
+ */
+function generateQlab(cues) {
+  cues = cues ?? parseCuelist();
+
+  const ops = [];                // flat list of cue-creation operations, consumed by the AppleScript runtime
+  const labels = new Map();      // #label -> media index
+  const media = [];              // media index -> { name, screen }
+  const onScreen = {};           // screen track -> array of media indices currently visible
+  for (const screen in QLAB_SCREENS) {
+    onScreen[screen] = [];
+  }
+
+  for (const cue of cues) {
+    const screens = Object.keys(QLAB_SCREENS).filter(s => cue.tracks[s]?.file != null || cue.tracks[s]?.params != null);
+    if (screens.length === 0) {
+      continue;
+    }
+    assert(/^\d+(\.\d+)?$/.test(String(cue.cue).trim()), `cue "${cue.cue}" has video, but no numeric cue number that MultiPlay can trigger`);
+
+    const number = String(cue.cue).trim();
+    const children = [];
+    let groupDelay = null;
+
+    for (const screen of screens) {
+      const { stage, label: screenLabel } = QLAB_SCREENS[screen];
+      const file = cue.tracks[screen].file;
+      const fileName = file == null ? null : (file.name ?? file).trim();
+      const p = parseVideoParams(cue.tracks[screen].params, `cue ${number} / ${screenLabel}`);
+
+      if (p.delay != null) {
+        assert(groupDelay == null || groupDelay === p.delay, `cue ${number}: conflicting $delay values across screens`);
+        groupDelay = p.delay;
+      }
+      assert(fileName || (p.label == null && !p.hasMediaParams), `cue ${number} / ${screenLabel}: params for a file, but no file`);
+
+      // 1. Control actions on media that is already running.
+      for (const action of p.actions) {
+        let targets;
+        if (action.target != null) {
+          assert(labels.has(action.target), `cue ${number} / ${screenLabel}: unknown label #${action.target}`);
+          targets = [labels.get(action.target)];
+        } else {
+          targets = [...onScreen[screen]];
+        }
+        assert(targets.length > 0, `cue ${number} / ${screenLabel}: ${action.type} but nothing is on screen`);
+        for (const t of targets) {
+          children.push(action.type === "!stop"
+            ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: t }
+            : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: action.duration, opacity: 0, stop: true });
+          removeFromScreens(onScreen, t);
+        }
+      }
+
+      // 2. New media, crossfading out whatever it replaces (unless $keep).
+      if (fileName) {
+        const isCamera = fileName.toLowerCase() === "@camera";
+        const idx = media.length;
+        media.push({ name: isCamera ? "live camera" : fileName, screen });
+        if (p.label != null) {
+          assert(!labels.has(p.label), `cue ${number}: duplicate label #${p.label}`);
+          labels.set(p.label, idx);
+        }
+
+        const fade = p.fade ?? QLAB_DEFAULT_FADE;
+        const replaced = p.keep ? [] : [...onScreen[screen]];
+        children.push({
+          op: isCamera ? "camera" : "video",
+          name: `${screenLabel}: ${media[idx].name}`,
+          file: isCamera ? "" : fileName,
+          stage,
+          media: idx,
+          opacity: fade > 0 ? 0 : 1,
+          loop: p.loop,
+          layer: p.layer,
+        });
+        if (fade > 0) {
+          children.push({ op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
+        }
+        for (const t of replaced) {
+          children.push({ op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
+          removeFromScreens(onScreen, t);
+        }
+        onScreen[screen].push(idx);
+      }
+    }
+
+    ops.push({ op: "group", number, name: cue.tracks.video?.description || cue.description || "", delay: groupDelay ?? 0 });
+    children.forEach((child, i) => ops.push({ ...child, number: `${number}-${subCueLetter(i)}` }));
+  }
+
+  const fill = {
+    "%%SHOW%%": asString(SHOW_NAME),
+    "%%CUE_LIST%%": asString(QLAB_CUE_LIST_NAME),
+    "%%MEDIA_FOLDER%%": asString(QLAB_MEDIA_FOLDER),
+    "%%MEDIA_COUNT%%": String(media.length),
+    "%%OPS%%": chunk(ops.map(toAppleScriptRecord), 50)
+      .map(part => "set ops to ops & {" + part.join(", ¬\n    ") + "}").join("\n"),
+  };
+  let content = QLAB_SCRIPT_TEMPLATE;
+  for (const [key, value] of Object.entries(fill)) {
+    content = content.split(key).join(value);
+  }
+  getOrCreateFile(`${SHOW_NAME}.applescript`).setContent(content);
+  return ops;
+}
+
+/** Sub-cue suffix for the i-th child of a group: a, b, …, z, aa, ab, … */
+function subCueLetter(i) {
+  let s = "";
+  for (i++; i > 0; i = Math.floor((i - 1) / 26)) {
+    s = String.fromCharCode(97 + (i - 1) % 26) + s;
+  }
+  return s;
+}
+
+/** Removes a media index from whichever screen it is currently on. */
+function removeFromScreens(onScreen, idx) {
+  for (const screen in onScreen) {
+    onScreen[screen] = onScreen[screen].filter(x => x !== idx);
+  }
+}
+
+/**
+ * Parses line-delimited video parameters for one screen of one cue. Same style as the sound params.
+ *
+ * Labels name the media in this cell so later cues can target it: `#<label>`.
+ *
+ * Parameters affect the media in this cell (they require a file):
+ * - `$fade-dur <sec>`: fade-in time of the new media, and fade-out time of the media it replaces
+ *   (default QLAB_DEFAULT_FADE; `0` = hard cut).
+ * - `$delay <sec>`: pre-wait of the whole cue (the same for all screens).
+ * - `$loop`: loop the video forever.
+ * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
+ * - `$layer <n>`: QLab video layer (higher is on top).
+ *
+ * Control actions target media that is already running, without needing a file:
+ * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
+ * - `!stop [#label]`: stop immediately (blackout).
+ */
+function parseVideoParams(input, where) {
+  const result = { label: null, fade: null, delay: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
+  const num = (v, name) => {
+    assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
+    return Number(v);
+  };
+
+  for (const rawLine of input?.split("\n") || []) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const [name, ...args] = line.split(/\s+/);
+
+    if (name.startsWith("#")) {
+      assert(args.length === 0 && result.label == null, `${where}: invalid label line "${line}"`);
+      result.label = name.slice(1);
+      continue;
+    }
+
+    switch (name) {
+      case "$fade-dur":
+        assert(args.length === 1, `${where}: usage $fade-dur <sec>`);
+        result.fade = num(args[0], name);
+        result.hasMediaParams = true;
+        break;
+      case "$delay":
+        assert(args.length === 1, `${where}: usage $delay <sec>`);
+        result.delay = num(args[0], name);
+        break;
+      case "$loop":
+        assert(args.length === 0, `${where}: usage $loop`);
+        result.loop = true;
+        result.hasMediaParams = true;
+        break;
+      case "$keep":
+        assert(args.length === 0, `${where}: usage $keep`);
+        result.keep = true;
+        result.hasMediaParams = true;
+        break;
+      case "$layer":
+        assert(args.length === 1, `${where}: usage $layer <n>`);
+        result.layer = num(args[0], name);
+        result.hasMediaParams = true;
+        break;
+      case "!fade-out":
+      case "!stop": {
+        const target = args[0]?.startsWith("#") ? args.shift().slice(1) : null;
+        let duration = 0;
+        if (name === "!fade-out") {
+          assert(args.length <= 1, `${where}: usage !fade-out [#label] [<sec>]`);
+          duration = args.length ? num(args[0], name) : QLAB_DEFAULT_FADE;
+        } else {
+          assert(args.length === 0, `${where}: usage !stop [#label]`);
+        }
+        result.actions.push({ type: name, target, duration });
+        break;
+      }
+      default:
+        assert(false, `${where}: invalid video param "${name}"`);
+    }
+  }
+  return result;
+}
+
+/** Splits an array into chunks (AppleScript chokes on very long list literals). */
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
+
+/** Quotes a JS string as an AppleScript string literal. */
+function asString(s) {
+  return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ") + '"';
+}
+
+/** Converts an op into an AppleScript record with a fixed set of fields (missing values get defaults). */
+function toAppleScriptRecord(op) {
+  // Keys are prefixed with "z" so they can't clash with terms from QLab's AppleScript dictionary.
+  const v = {
+    zKind: asString(op.op),
+    zNum: asString(op.number),
+    zName: asString(op.name || ""),
+    zFile: asString(op.file || ""),
+    zStage: asString(op.stage || ""),
+    zMedia: (op.media ?? -1) + 1,      // AppleScript lists are 1-based; 0 = none
+    zTarget: (op.target ?? -1) + 1,
+    zDur: op.duration ?? 0,
+    zOpacity: op.opacity ?? 1,
+    zStop: op.stop ? "true" : "false",
+    zLoop: op.loop ? "true" : "false",
+    zLayer: op.layer ?? 0,
+    zPreWait: op.delay ?? 0,
+  };
+  return "{" + Object.entries(v).map(([k, x]) => `${k}:${x}`).join(", ") + "}";
+}
+
+const QLAB_SCRIPT_TEMPLATE = `-- Generated by the ZEST cue list sheet ("ZEST > Generate QLab script"). Do not edit by hand.
+-- Show: %%SHOW%%
+-- Run this on the QLab Mac with the show workspace open (open in Script Editor, press Run).
+-- It deletes the cue list %%CUE_LIST%% and rebuilds it from the sheet, so it is safe to re-run.
+
+property cueListName : %%CUE_LIST%%
+property mediaFolder : %%MEDIA_FOLDER%% -- relative to the folder containing the workspace, or an absolute path
+
+set ops to {}
+%%OPS%%
+
+tell application id "com.figure53.QLab.5"
+  activate
+  tell front workspace
+    -- Resolve the media folder.
+    set wsPath to missing value
+    try
+      set wsPath to path
+    end try
+    if mediaFolder starts with "/" then
+      set mediaPath to mediaFolder
+    else if wsPath is missing value then
+      -- QLab reports no path for unsaved workspaces: ask for the media folder instead.
+      tell current application to set chosen to choose folder with prompt "QLab can't tell where this workspace is saved. Select the media folder (\\"" & mediaFolder & "\\"):"
+      set mediaPath to POSIX path of chosen
+      if mediaPath ends with "/" then set mediaPath to text 1 thru -2 of mediaPath
+    else
+      tell current application to set wsFolder to do shell script "dirname " & quoted form of wsPath
+      set mediaPath to wsFolder & "/" & mediaFolder
+    end if
+
+    -- Replace the previously generated cue list.
+    repeat with cl in (cue lists whose q name is cueListName)
+      delete cue id (uniqueID of cl)
+    end repeat
+    make type "Cue List"
+    set theList to last cue list
+    set q name of theList to cueListName
+    set current cue list to theList
+
+    set mediaIDs to {}
+    repeat %%MEDIA_COUNT%% times
+      set end of mediaIDs to ""
+    end repeat
+    set problems to {}
+    set currentGroup to missing value
+    set previousChild to missing value
+
+    repeat with o in ops
+      set k to zKind of o
+      if k is "group" then
+        make type "Group"
+      else if k is "video" then
+        make type "Video"
+      else if k is "camera" then
+        make type "Camera"
+      else if k is "fade" then
+        make type "Fade"
+      else if k is "stop" then
+        make type "Stop"
+      end if
+      set c to last item of (selected as list)
+      set q number of c to (zNum of o)
+      set q name of c to (zName of o)
+      if q number of c is not (zNum of o) then
+        set end of problems to "cue number " & (zNum of o) & " is already used elsewhere in the workspace"
+      end if
+
+      if k is "group" then
+        set pre wait of c to (zPreWait of o)
+        move cue id (uniqueID of c) of parent of c to end of theList
+        set currentGroup to c
+        set previousChild to missing value
+      else
+        if k is "video" or k is "camera" then
+          if k is "video" then
+            set f to mediaPath & "/" & (zFile of o)
+            try
+              tell current application to do shell script "test -e " & quoted form of f
+              set file target of c to POSIX file f
+            on error
+              set end of problems to "cue " & (zNum of o) & ": missing file " & f
+            end try
+          end if
+          try
+            set stage name of c to (zStage of o)
+          on error
+            set end of problems to "cue " & (zNum of o) & ": no stage named " & (zStage of o)
+          end try
+          set opacity of c to (zOpacity of o)
+          if zLoop of o then set infinite loop of c to true
+          if (zLayer of o) is not 0 then set layer of c to (zLayer of o)
+          set item (zMedia of o) of mediaIDs to (uniqueID of c)
+        else
+          set cue target of c to cue id (item (zTarget of o) of mediaIDs)
+          if k is "fade" then
+            set duration of c to (zDur of o)
+            set do opacity of c to true
+            set opacity of c to (zOpacity of o)
+            set stop target when done of c to (zStop of o)
+          end if
+        end if
+        move cue id (uniqueID of c) of parent of c to end of currentGroup
+        -- Chain the group's children with auto-continue so they all fire together.
+        if previousChild is not missing value then set continue mode of previousChild to auto_continue
+        set previousChild to c
+      end if
+    end repeat
+
+    if problems is {} then
+      display dialog "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)." buttons {"OK"} default button 1
+    else
+      set AppleScript's text item delimiters to return
+      display dialog "Generated with " & (count of problems) & " problem(s):" & return & return & (problems as text) buttons {"OK"} default button 1 with icon caution
+    end if
+  end tell
+end tell
+`;
