@@ -21,6 +21,14 @@
  */
 function generateQlab(cues) {
   cues = cues ?? parseCuelist();
+  if (cues == null) return; // parse errors already reported
+  if (cues.length === 0) {
+    // Nothing to generate (empty sheet). Bail out so existing output is not overwritten.
+    console.warn("[qlab] no cues, nothing to do");
+    return;
+  }
+
+  const ctx = new Context("qlab");
 
   const ops = [];                // flat list of cue-creation operations, consumed by the AppleScript runtime
   const state = {
@@ -34,22 +42,32 @@ function generateQlab(cues) {
   }
   let autoCount = 0;
 
-  for (const { cue: triggered, autos } of groupAutoCues(cues)) {
+  for (const { cue: triggered, autos } of groupAutoCues(cues, ctx)) {
     const autosWithVideo = autos.filter(row => hasVideo(row));
     if (!hasVideo(triggered) && autosWithVideo.length === 0) {
       continue;
     }
     const triggeredNumber = String(triggered.cue).trim();
     // The number goes into the OSC address /cue/<number>/start, so no spaces, slashes or wildcard characters.
-    assert(/^[A-Za-z0-9_.]+$/.test(triggeredNumber), `cue "${triggered.cue}" has video, but its cue number can't be triggered via OSC (use letters, digits, "." and "_")`);
+    if (!ctx.at(triggered).check(/^[A-Za-z0-9_.]+$/.test(triggeredNumber), `has video, but its cue id can't be triggered via OSC (use letters, digits, "." and "_")`)) {
+      continue;
+    }
 
     // The triggered group (empty when only its auto-cues have video), then one group per auto-cue.
     let previous = null;
     for (const row of [triggered, ...autosWithVideo]) {
       const isAuto = row !== triggered;
       const number = isAuto ? `auto-${++autoCount}` : triggeredNumber;
-      const where = isAuto ? `${number} (after cue ${triggeredNumber})` : `cue ${number}`;
-      const built = buildVideoCue(row, where, state);
+      const where = isAuto ? number : "video"; // message prefix; the row and cue id are added by the context
+      // The parsing / validation helpers below throw on the first problem in a row (see assert): report it and skip
+      // the row, so that one run reports the problems of all rows.
+      let built;
+      try {
+        built = buildVideoCue(row, where, state);
+      } catch (e) {
+        ctx.at(row).err(e.message);
+        continue;
+      }
       const { children, endless } = built;
       let delay = built.delay;
 
@@ -80,6 +98,12 @@ function generateQlab(cues) {
   let content = QLAB_SCRIPT_TEMPLATE;
   for (const [key, value] of Object.entries(fill)) {
     content = content.split(key).join(value);
+  }
+  ctx.at();
+  ctx.report("output not updated");
+  if (ctx.hasErrors()) {
+    // Do not overwrite the existing script with an incomplete / broken one.
+    return ops;
   }
   getOrCreateFile(`${SHOW_NAME}.applescript`).setContent(content);
   return ops;
@@ -192,7 +216,7 @@ function hasVideo(row, screen) {
  * Groups the rows into the cues MultiPlay triggers, each with the auto-cue rows that follow it up to the next
  * triggered cue: [{ cue, autos: [...] }].
  */
-function groupAutoCues(cues) {
+function groupAutoCues(cues, ctx = null) {
   const groups = [];
   for (const cue of cues) {
     if (!isAutoCue(cue)) {
@@ -200,7 +224,7 @@ function groupAutoCues(cues) {
     } else if (groups.length > 0) {
       groups[groups.length - 1].autos.push(cue);
     } else {
-      assert(!hasVideo(cue), `row "${cue.description ?? ""}" has video, but no cue number and no earlier cue to follow`);
+      ctx?.at(cue).check(!hasVideo(cue), "video without a cue id, and no earlier cue to follow");
     }
   }
   return groups;

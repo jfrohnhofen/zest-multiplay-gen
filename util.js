@@ -56,3 +56,76 @@ function assert(cond, msg) {
     throw new Error(msg);
   }
 }
+
+/**
+ * Collects warnings and errors for a single phase (e.g. "parse", "multiplay", "assets").
+ *
+ * Neither `warn` nor `err` throws. Callers record the problem and carry on (or skip the offending item),
+ * so that a single run reports everything that is wrong. At the end of the phase, callers check `hasErrors()`
+ * to decide whether to write any output and call `report()` to log / summarize the issues.
+ *
+ * Messages are prefixed with the phase, and the current row / cue (see `at`) when set.
+ */
+class Context {
+  constructor(phase) {
+    this.phase = phase;
+    this.issues = [];
+    this.row = null;
+    this.cue = null;
+  }
+
+  /** Sets the cue (see `parseCuelist`) whose row and cue id subsequent messages refer to. Call with no arguments to clear. */
+  at(cue = null) {
+    this.row = cue?.row ?? null;
+    this.cue = cue?.cue || null;
+    return this;
+  }
+
+  warn(msg) {
+    this._add("warning", msg);
+  }
+
+  err(msg) {
+    this._add("error", msg);
+  }
+
+  /** Records an error if `cond` is falsy. Returns `cond` so callers can write `if (!ctx.check(...)) continue;`. */
+  check(cond, msg) {
+    if (!cond) {
+      this.err(msg);
+    }
+    return cond;
+  }
+
+  hasErrors() {
+    return this.issues.some(x => x.severity === "error");
+  }
+
+  /**
+   * Logs all issues to the console and returns a one-line summary (e.g. "[parse] 2 errors, 1 warning").
+   * If there are errors, `onErrors` (e.g. "output not updated") is appended to the summary.
+   */
+  report(onErrors = null) {
+    for (const {severity, text} of this.issues) {
+      (severity === "error" ? console.error : console.warn)(text);
+    }
+
+    const count = severity => this.issues.filter(x => x.severity === severity).length;
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const summary = this.issues.length === 0
+      ? `[${this.phase}] ok`
+      : `[${this.phase}] ${plural(count("error"), "error")}, ${plural(count("warning"), "warning")}`
+        + (onErrors && this.hasErrors() ? ` - ${onErrors}` : "");
+    console.log(summary);
+    return summary;
+  }
+
+  _add(severity, msg) {
+    const where = [
+      this.row != null ? `row ${this.row}` : null,
+      this.cue != null ? `cue ${this.cue}` : null,
+    ].filter(x => x != null).join(" / ");
+    const text = `[${this.phase}] ${where ? `${where}: ` : ""}${msg}`;
+    this.issues.push({severity, row: this.row, cue: this.cue, msg, text});
+  }
+}

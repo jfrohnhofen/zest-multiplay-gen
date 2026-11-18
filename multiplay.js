@@ -6,6 +6,14 @@
  */
 function generateMultiplay(cues) {
   cues = cues ?? parseCuelist();
+  if (cues == null) return; // parse errors already reported
+  if (cues.length === 0) {
+    // Nothing to generate (empty sheet). Bail out so existing output is not overwritten / wiped.
+    console.warn("[multiplay] no cues, nothing to do");
+    return;
+  }
+
+  const ctx = new Context("multiplay");
 
   let nextUid = 1;
   let multiplayCues = [];
@@ -17,14 +25,13 @@ function generateMultiplay(cues) {
   const videoCues = new Set(groupAutoCues(cues).filter(g => [g.cue, ...g.autos].some(row => hasVideo(row))).map(g => g.cue));
 
   for (const cue of cues) {
-    // Rows without a cue number aren't triggered by the operator: their video runs in QLab (see generateQlab), and
-    // their sound fires together with the previous cue, delayed by its $delay (MultiPlay's pre-wait timer).
+    ctx.at(cue);
+
+    // Rows without a cue id aren't triggered by the operator: their video runs in QLab (see generateQlab), and their
+    // sound fires together with the previous cue, delayed by its $delay (MultiPlay's pre-wait timer).
     const isAuto = isAutoCue(cue);
-    if (isAuto) {
-      if (cue.tracks.sound?.file == null && cue.tracks.sound?.params == null) {
-        continue;
-      }
-      assert(multiplayCues.length > 0, `row "${cue.description ?? ""}" has sound, but no cue number and no earlier cue to follow`);
+    if (isAuto && (!hasSound(cue) || !ctx.check(multiplayCues.length > 0, "sound without a cue id, and no earlier cue to fire with"))) {
+      continue;
     }
 
     // Adds a single cue. One input cue (i.e. a single row in the input sheet) may corespond to multiple MultiPlay cues (e.g.
@@ -79,26 +86,32 @@ function generateMultiplay(cues) {
     if (cue.tracks.sound) {
       // Generates an audio cue iff a sound file is linked in the file column.
       // In addition, generates a control cue for each control action in the params column (see parseParams for details).
-      const {label, params, actions} = parseParams(cue.tracks.sound.params, soundLabels);
-      const hasFile = cue.tracks.sound.file != null;
+      const {label, params, actions} = parseParams(cue.tracks.sound.params, soundLabels, ctx);
+      const file = cue.tracks.sound.file;
+      const hasFile = file != null;
       const hasLabel = label != null;
       const hasParams = Object.keys(params).length > 0;
 
-      // The params need an audio cue / file to apply to.
-      assert(hasFile || !hasParams, `sound cue ${cue.cue} has params, but no file`);
-      // The label needs an audio cue / file to apply to.
-      assert(hasFile || !hasLabel, `sound cue ${cue.cue} has label, but no file`);
+      // The file has to be a link (smart chip), as opposed to plain text.
+      const hasValidFile = hasFile && ctx.check(file.name != null, `sound file "${file}" is not a link to a file`);
 
-      if (hasLabel) {
-        assert(!soundLabels.has(label), `duplicate label #${label}`);
+      // The params need an audio cue / file to apply to.
+      ctx.check(hasFile || !hasParams, "sound has params, but no file");
+      // The label needs an audio cue / file to apply to.
+      ctx.check(hasFile || !hasLabel, `sound has label #${label}, but no file`);
+      if (!hasFile && !hasParams && !hasLabel && actions.length === 0) {
+        ctx.warn("sound has neither file nor actions, and does nothing");
+      }
+
+      if (hasLabel && ctx.check(!soundLabels.has(label), `duplicate label #${label}`)) {
         soundLabels.set(label, nextUid);
       }
 
-      if (hasFile) {
+      if (hasValidFile) {
         addCue("SX", cue.tracks.sound.description, {...{
           Type: 0,
           File: {
-            $Name: `${LOCAL_FOLDER}\\sound\\${cue.tracks.sound.file.name}`,
+            $Name: `${LOCAL_FOLDER}\\sound\\${file.name}`,
           },
           AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
         }, ...params});
@@ -128,7 +141,14 @@ function generateMultiplay(cues) {
       });
     }
 
-    assert(isAuto || !isPrimaryCue, `cue ${cue.cue} has no action`);
+    ctx.check(isAuto || !isPrimaryCue, "cue has no action");
+  }
+  ctx.at();
+
+  ctx.report("output not updated");
+  if (ctx.hasErrors()) {
+    // Do not overwrite the existing file with an incomplete / broken one.
+    return;
   }
 
   const cueList = XmlService.createElement("CueList");
@@ -158,8 +178,10 @@ function generateMultiplay(cues) {
  * - `!resume <target_label>`: Resume control cue targeting labeled cue.
  * - `!fade-out <target_label>`: Fade out control cue targeting labeled cue.
  * - `!inc-volume <target_label> +<dB>dB <fade_sec>`: Relative volume change control cue.
+ *
+ * Problems are reported to the given context, and the offending line is skipped.
  */
-function parseParams(input, labels) {
+function parseParams(input, labels, ctx) {
   let label = null;
   const actions = [];
   const params = {};
@@ -169,51 +191,56 @@ function parseParams(input, labels) {
     const name = parts[0];
     const args = parts.slice(1);
 
+    // Reports an error if the number of arguments of the current line is not in the range [min, max].
+    const checkArgs = (min, max = min) => ctx.check(
+      args.length >= min && args.length <= max,
+      `${name} expects ${min === max ? min : `${min}-${max}`} argument(s), got ${args.length}`);
+
     if (name.startsWith("#")) {
-      assert(args.length === 0);
-      assert(label == null);
+      if (!ctx.check(args.length === 0, `label ${name} must not have arguments`)) continue;
+      if (!ctx.check(label == null, `more than one label (#${label} and ${name})`)) continue;
       label = name.slice(1);
       continue;
     }
 
     switch (name) {
       case "$loop":
-        assert(args.length <= 1);
+        if (!checkArgs(0, 1)) break;
         params.Loops = args[0] || 0;
         break;
 
       case "$fade-in-dur":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params.Fade = params.Fade || {};
         params.Fade.$In = args[0] * 1000;
         break;
 
       case "$fade-out-dur":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params.Fade = params.Fade || {};
         params.Fade.$Out = args[0] * 1000;
         params.Fade.$AtEnd = -1;
         break;
 
       case "$delay":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params.Wait = params.Wait || {};
         params.Wait.$Pre = args[0] * 1000;
         break;
 
       case "$volume":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params["Volume-dB"] = args[0];
         break;
 
       case "$start-pos":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params.File = params.File || {};
         params.File.$StartPos = args[0] * 1000;
         break;
 
       case "$stop-pos":
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         params.File = params.File || {};
         params.File.$StopPos = args[0] * 1000;
         break;
@@ -225,9 +252,9 @@ function parseParams(input, labels) {
         const action = { "!stop": 1,"!pause": 2,"!resume": 3,"!fade-out": 13 }[name];
         assert(action != null);
         
-        assert(args.length === 1);
+        if (!checkArgs(1)) break;
         const target = labels.get(args[0]);
-        assert(target != null);
+        if (!ctx.check(target != null, `${name} refers to unknown label "${args[0]}"`)) break;
         
         actions.push({
           Type: 5,
@@ -236,20 +263,19 @@ function parseParams(input, labels) {
         break;
 
       case "!inc-volume":
-        assert(args.length === 3);
+        if (!checkArgs(3)) break;
         const volTarget = labels.get(args[0]);
-        assert(volTarget != null);
+        if (!ctx.check(volTarget != null, `${name} refers to unknown label "${args[0]}"`)) break;
         const change = args[1].match(/\+(\d+)dB/)?.[1];
-        assert(change);
+        if (!ctx.check(change, `${name} expects a volume change like +3dB, got "${args[1]}"`)) break;
         actions.push({
           Type: 5,
           Control: { $Action: 4, $Target: volTarget, $EndValue: change, $FadeTime: args[2] * 1000, $RelativeFade: -1},
         });
         break;
-        break;
       
       default:
-        assert(false, `invalid param ${name}`);
+        ctx.err(`invalid param "${name}"`);
     }
   }
   
