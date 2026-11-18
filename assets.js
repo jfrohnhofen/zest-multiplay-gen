@@ -29,6 +29,10 @@ function bundleAssets(cues) {
       if (file == null) {
         continue;
       }
+      // Live camera cues (see generateQlab) have no file to bundle.
+      if (QLAB_SCREENS[track] && String(file.name ?? file).trim().toLowerCase() === "@camera") {
+        continue;
+      }
 
       const id = file.uri?.match(/[-\w]{25,}/)?.[0];
       if (!ctx.check(id != null, `${track} file "${file.name ?? file}" is not a link to a Google Drive file`)) {
