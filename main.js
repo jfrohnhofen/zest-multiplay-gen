@@ -1,11 +1,11 @@
 // Name of the current show/production.
-const SHOW_NAME = "TGWDLM";
+const SHOW_NAME = "RENT";
 
 // Target local filesystem base directory path for show assets.
 const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\${SHOW_NAME}`;
 
 // Google Drive folder ID where generated output files and assets are stored.
-const OUTPUT_FOLDER = "14_x-YgxC_f4qcOL4cAtCpBEBBoDypu0z";
+const OUTPUT_FOLDER = "1RwTI0YfCxGI4Qk3Ubm5ZenbZKnNTJEfC";
 
 // Patches configured in MultiPlay.
 const MULTIPLAY_LX_NETWORK_PATCH = 0;
@@ -17,19 +17,24 @@ const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
 
 // QLab video screens. Keys are the (lower-case) first header line of the sheet's video columns: each screen has
 // a `<screen>\nfile` and a `<screen>\nparams` column. `stage` is the name of the QLab video stage it plays on.
-// For RENT this becomes e.g. { "sl screen": {...}, "sr screen": {...}, "projector": {...} }.
+// `label` is a short screen name used in the QLab cue names.
 const QLAB_SCREENS = {
-  "video": { stage: "Stage 2", label: "LED" },
+  "sl screen": { stage: "Window", label: "Window" },
+  "sr screen": { stage: "Fence", label: "Fence" },
+  "projector": { stage: "Projector", label: "Projector" },
 };
 
 // Name of the QLab cue list the generated script (re)creates. Anything in it is replaced on every run.
-const QLAB_CUE_LIST_NAME = "ZEST video";
+const QLAB_CUE_LIST_NAME = "ZEST - RENT - video";
 
 // Folder with the video / image files on the QLab Mac, relative to the workspace file (or an absolute path).
 const QLAB_MEDIA_FOLDER = "video";
 
 // Default fade-in / crossfade time in seconds when a cell has no $fade-dur.
 const QLAB_DEFAULT_FADE = 1;
+
+// Delay in seconds of an auto-cue without $delay after an image, a loop or the camera (which never end by themselves).
+const QLAB_DEFAULT_AUTO_DELAY = 5;
 
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
@@ -82,12 +87,21 @@ function parseCuelist() {
       }
     }
 
-    if (cue.cue) {
+    // Rows without a cue number are kept if they have track content: they may hold QLab auto-cues.
+    if (cue.cue || Object.keys(cue.tracks).length > 0) {
       cues.push(cue);
     }
   }
-  
+
   return cues;
+}
+
+/**
+ * True for rows that MultiPlay doesn't trigger: no cue number, `-` or `n/a`. QLab runs their video automatically
+ * after the previous cue (see generateQlab).
+ */
+function isAutoCue(cue) {
+  return ["", "-", "n/a"].includes(String(cue.cue ?? "").trim().toLowerCase());
 }
 
 /**

@@ -18,8 +18,9 @@ An automated Google Apps Script project for theatre productions that parses mast
 - **QLab Video Cue List Generator**: Outputs an AppleScript that rebuilds the QLab video cue list from the sheet, with cue numbers matching the MultiPlay triggers.
   - Multiple screens (QLab stages), each with its own file and params column.
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
+  - Auto-cues: rows without a cue number run in QLab by themselves, after the previous cue.
   - Parameter controls: `$fade-dur`, `$delay`, `$loop`, `$keep`, `$layer`.
-  - Cue targeting & control actions: `#label` tags, `!fade-out` and `!stop`.
+  - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
 - **Asset Bundler**: Automatically creates Google Drive shortcuts for all referenced media files inside track-specific subfolders (`sound`, `video`, etc.) in the designated output folder. Files from all video screens are collected in one `video` folder.
 - **Custom Google Sheets UI**: Adds a custom **ZEST** menu item directly to the spreadsheet toolbar for easy execution.
 
@@ -53,7 +54,8 @@ Headers support multi-line values to denote track-specific properties (`track\np
 |-----|----|-------|-------------|---------------|-----------------|--------------------|-------------------|-------------------|---------------------|-------------------|---------------------|
 | `1` | 5  | Sc 1  | Opening     | `track1.mp3`  | `$fade-in-dur 2` | Warm amber wash    | Title graphic     | `title.png`       | `$fade-dur 3`       | `@camera`         | `#cam`              |
 
-Rows without a value in the `Cue` column are ignored. Header names are case-insensitive.
+Rows without a cue number (empty, `-` or `n/a`) are not triggered by the operator: their video becomes QLab
+auto-cues and their sound fires with the previous cue (see [Auto-cues](#auto-cues)); other columns are ignored. Header names are case-insensitive.
 
 The video screen columns (`SL screen`, `SR screen`, … above) are not fixed: each screen listed in `QLAB_SCREENS`
 gets a `<Screen>\nFile` and a `<Screen>\nParams` column, using the screen's key as the first header line. For a
@@ -93,8 +95,24 @@ generates an AppleScript because a `.qlab5` workspace is an undocumented binary 
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
-which MultiPlay starts via OSC `/cue/<X>/start`. Inside, numbered `<X>-a`, `<X>-b`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
+which MultiPlay starts via OSC `/cue/<X>/start`. Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
 and fade-and-stop cues for whatever it replaces on that screen.
+
+### Auto-cues
+
+A row with video but no cue number (empty, `-` or `n/a`) becomes a group `auto-1`, `auto-2`, … (numbered through the
+whole show) that QLab starts by itself:
+
+- by default when the previous cue ends (auto-follow), e.g. the next video after a clip finishes;
+- with `$delay <sec>`, that many seconds after the previous cue starts (auto-continue plus pre-wait).
+
+The previous cue is the row above with video, triggered or auto. If the triggered cue above has no video itself,
+it gets an empty QLab group (and a MultiPlay VX trigger) for its auto-cues to follow. Images, `$loop` videos and
+`@camera` never end, so an auto-cue without `$delay` after them starts `QLAB_DEFAULT_AUTO_DELAY` seconds (default 5)
+after they start.
+
+Sound in a row without a cue number is fired by MultiPlay together with the previous cue, after the row's sound
+`$delay` (MultiPlay's pre-wait timer). It is timed independently of the row's video.
 
 ### File column
 
@@ -104,12 +122,14 @@ A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or
 
 - `#<label>` — Names the media in this cell so later cues can target it.
 - `$fade-dur <sec>` — Fade-in time of the new media and fade-out time of what it replaces (default `QLAB_DEFAULT_FADE`; `0` = cut).
-- `$delay <sec>` — Pre-wait of the whole cue (all screens in the row).
+- `$delay <sec>` — Pre-wait of the whole cue (all screens in the row). On an auto-cue, counted from the start of the previous cue.
 - `$loop` — Loop the video forever.
 - `$keep` — Keep what is already on this screen and layer the new media on top.
 - `$layer <n>` — QLab video layer (higher is on top).
-- `!fade-out [#label] [<sec>]` — Fade out and stop the labeled media, or everything on this screen.
-- `!stop [#label]` — Stop immediately (blackout).
+- `!fade-out [#label] [<sec>]` — Fade out and stop the labeled media, or everything on this screen (nothing if the screen is empty).
+- `!stop [#label]` — Stop immediately (blackout), like `!fade-out`.
+- `!pause [#label]` — Pause the labeled video, or everything playing on this screen (the frame stays on screen).
+- `!resume [#label]` — Resume the labeled video, or everything paused on this screen.
 
 ---
 
@@ -130,6 +150,7 @@ Production settings are managed in [main.js](main.js):
   - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list (replaced on every run).
   - `QLAB_MEDIA_FOLDER`: Media folder on the QLab Mac, relative to the workspace file or absolute (default `video`).
   - `QLAB_DEFAULT_FADE`: Default fade-in / crossfade time in seconds.
+  - `QLAB_DEFAULT_AUTO_DELAY`: Delay of an auto-cue without `$delay` after an image, loop or camera (default 5 s).
 
 ---
 

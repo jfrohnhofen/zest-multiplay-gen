@@ -8,9 +8,12 @@
  *
  * Every sheet row with video content becomes a group cue numbered like the sheet cue (e.g. `4`), which is what
  * MultiPlay triggers via OSC `/cue/4/start`. The group fires all its children at once:
- *   4-a  video / image / camera cue (starts at opacity 0 when it fades in)
- *   4-b  fade cue: opacity 0 -> 1 over the fade duration
- *   4-c  fade cue: fades out and stops whatever was showing on that screen before
+ *   4-1  video / image / camera cue (starts at opacity 0 when it fades in)
+ *   4-2  fade cue: opacity 0 -> 1 over the fade duration
+ *   4-3  fade cue: fades out and stops whatever was showing on that screen before
+ *
+ * Rows without a cue number (or `-` / `n/a`, see isAutoCue) become groups `auto-1`, `auto-2`, … that QLab starts by
+ * itself: when the previous group ends (auto-follow), or `$delay` seconds after it starts (auto-continue).
  *
  * Each screen (stage) has its own pair of columns, configured in QLAB_SCREENS:
  *   `<screen>\nfile`    file name or Drive smart chip, or `@camera` for a live camera cue
@@ -20,96 +23,57 @@ function generateQlab(cues) {
   cues = cues ?? parseCuelist();
 
   const ops = [];                // flat list of cue-creation operations, consumed by the AppleScript runtime
-  const labels = new Map();      // #label -> media index
-  const media = [];              // media index -> { name, screen }
-  const onScreen = {};           // screen track -> array of media indices currently visible
+  const state = {
+    labels: new Map(),           // #label -> media index
+    media: [],                   // media index -> { name, screen }
+    onScreen: {},                // screen track -> array of media indices currently visible
+    paused: new Set(),           // media indices that are paused (and still visible)
+  };
   for (const screen in QLAB_SCREENS) {
-    onScreen[screen] = [];
+    state.onScreen[screen] = [];
   }
+  let autoCount = 0;
 
-  for (const cue of cues) {
-    const screens = Object.keys(QLAB_SCREENS).filter(s => cue.tracks[s]?.file != null || cue.tracks[s]?.params != null);
-    if (screens.length === 0) {
+  for (const { cue: triggered, autos } of groupAutoCues(cues)) {
+    const autosWithVideo = autos.filter(row => hasVideo(row));
+    if (!hasVideo(triggered) && autosWithVideo.length === 0) {
       continue;
     }
-    assert(/^\d+(\.\d+)?$/.test(String(cue.cue).trim()), `cue "${cue.cue}" has video, but no numeric cue number that MultiPlay can trigger`);
+    const triggeredNumber = String(triggered.cue).trim();
+    // The number goes into the OSC address /cue/<number>/start, so no spaces, slashes or wildcard characters.
+    assert(/^[A-Za-z0-9_.]+$/.test(triggeredNumber), `cue "${triggered.cue}" has video, but its cue number can't be triggered via OSC (use letters, digits, "." and "_")`);
 
-    const number = String(cue.cue).trim();
-    const children = [];
-    let groupDelay = null;
+    // The triggered group (empty when only its auto-cues have video), then one group per auto-cue.
+    let previous = null;
+    for (const row of [triggered, ...autosWithVideo]) {
+      const isAuto = row !== triggered;
+      const number = isAuto ? `auto-${++autoCount}` : triggeredNumber;
+      const where = isAuto ? `${number} (after cue ${triggeredNumber})` : `cue ${number}`;
+      const built = buildVideoCue(row, where, state);
+      const { children, endless } = built;
+      let delay = built.delay;
 
-    for (const screen of screens) {
-      const { stage, label: screenLabel } = QLAB_SCREENS[screen];
-      const file = cue.tracks[screen].file;
-      const fileName = file == null ? null : (file.name ?? file).trim();
-      const p = parseVideoParams(cue.tracks[screen].params, `cue ${number} / ${screenLabel}`);
-
-      if (p.delay != null) {
-        assert(groupDelay == null || groupDelay === p.delay, `cue ${number}: conflicting $delay values across screens`);
-        groupDelay = p.delay;
+      if (isAuto) {
+        // Waiting for images, loops or the camera to end would wait forever: start after a default delay instead.
+        if (delay == null && previous.endless.length > 0) {
+          delay = QLAB_DEFAULT_AUTO_DELAY;
+        }
+        previous.group.continueMode = delay != null
+          ? "continue"   // starts $delay seconds after the previous group starts
+          : "follow";    // starts when the previous group ends
       }
-      assert(fileName || (p.label == null && !p.hasMediaParams), `cue ${number} / ${screenLabel}: params for a file, but no file`);
-
-      // 1. Control actions on media that is already running.
-      for (const action of p.actions) {
-        let targets;
-        if (action.target != null) {
-          assert(labels.has(action.target), `cue ${number} / ${screenLabel}: unknown label #${action.target}`);
-          targets = [labels.get(action.target)];
-        } else {
-          targets = [...onScreen[screen]];
-        }
-        assert(targets.length > 0, `cue ${number} / ${screenLabel}: ${action.type} but nothing is on screen`);
-        for (const t of targets) {
-          children.push(action.type === "!stop"
-            ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: t }
-            : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: action.duration, opacity: 0, stop: true });
-          removeFromScreens(onScreen, t);
-        }
-      }
-
-      // 2. New media, crossfading out whatever it replaces (unless $keep).
-      if (fileName) {
-        const isCamera = fileName.toLowerCase() === "@camera";
-        const idx = media.length;
-        media.push({ name: isCamera ? "live camera" : fileName, screen });
-        if (p.label != null) {
-          assert(!labels.has(p.label), `cue ${number}: duplicate label #${p.label}`);
-          labels.set(p.label, idx);
-        }
-
-        const fade = p.fade ?? QLAB_DEFAULT_FADE;
-        const replaced = p.keep ? [] : [...onScreen[screen]];
-        children.push({
-          op: isCamera ? "camera" : "video",
-          name: `${screenLabel}: ${media[idx].name}`,
-          file: isCamera ? "" : fileName,
-          stage,
-          media: idx,
-          opacity: fade > 0 ? 0 : 1,
-          loop: p.loop,
-          layer: p.layer,
-        });
-        if (fade > 0) {
-          children.push({ op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
-        }
-        for (const t of replaced) {
-          children.push({ op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
-          removeFromScreens(onScreen, t);
-        }
-        onScreen[screen].push(idx);
-      }
+      const group = { op: "group", number, name: row.tracks.video?.description || row.description || "", delay: delay ?? 0, continueMode: "" };
+      ops.push(group);
+      children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
+      previous = { group, endless };
     }
-
-    ops.push({ op: "group", number, name: cue.tracks.video?.description || cue.description || "", delay: groupDelay ?? 0 });
-    children.forEach((child, i) => ops.push({ ...child, number: `${number}-${subCueLetter(i)}` }));
   }
 
   const fill = {
     "%%SHOW%%": asString(SHOW_NAME),
     "%%CUE_LIST%%": asString(QLAB_CUE_LIST_NAME),
     "%%MEDIA_FOLDER%%": asString(QLAB_MEDIA_FOLDER),
-    "%%MEDIA_COUNT%%": String(media.length),
+    "%%MEDIA_COUNT%%": String(state.media.length),
     "%%OPS%%": chunk(ops.map(toAppleScriptRecord), 50)
       .map(part => "set ops to ops & {" + part.join(", ¬\n    ") + "}").join("\n"),
   };
@@ -121,13 +85,125 @@ function generateQlab(cues) {
   return ops;
 }
 
-/** Sub-cue suffix for the i-th child of a group: a, b, …, z, aa, ab, … */
-function subCueLetter(i) {
-  let s = "";
-  for (i++; i > 0; i = Math.floor((i - 1) / 26)) {
-    s = String.fromCharCode(97 + (i - 1) % 26) + s;
+/**
+ * Builds the children of one row's group, and updates what is on each screen.
+ * Returns the row's $delay (or null) and the names of new media that never end on their own (images, loops, camera).
+ */
+function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
+  const children = [];
+  const endless = [];
+  let delay = null;
+
+  for (const screen of Object.keys(QLAB_SCREENS).filter(s => hasVideo(row, s))) {
+    const { stage, label: screenLabel } = QLAB_SCREENS[screen];
+    const file = row.tracks[screen].file;
+    const fileName = file == null ? null : (file.name ?? file).trim();
+    const p = parseVideoParams(row.tracks[screen].params, `${where} / ${screenLabel}`);
+
+    if (p.delay != null) {
+      assert(delay == null || delay === p.delay, `${where}: conflicting $delay values across screens`);
+      delay = p.delay;
+    }
+    assert(fileName || (p.label == null && !p.hasMediaParams), `${where} / ${screenLabel}: params for a file, but no file`);
+
+    // 1. Control actions on media that is already running.
+    for (const action of p.actions) {
+      const isPause = action.type === "!pause";
+      const isResume = action.type === "!resume";
+      let targets;
+      if (action.target != null) {
+        assert(labels.has(action.target), `${where} / ${screenLabel}: unknown label #${action.target}`);
+        targets = [labels.get(action.target)];
+        assert(!isPause || !paused.has(targets[0]), `${where} / ${screenLabel}: #${action.target} is already paused`);
+        assert(!isResume || paused.has(targets[0]), `${where} / ${screenLabel}: #${action.target} is not paused`);
+      } else {
+        // Without a label: everything on this screen (that is playing for !pause, paused for !resume).
+        targets = onScreen[screen].filter(t => isPause ? !paused.has(t) : !isResume || paused.has(t));
+      }
+      // Fading out / stopping an empty screen is fine (e.g. "make sure all screens are black"); pausing nothing is a mistake.
+      assert(targets.length > 0 || action.type === "!fade-out" || action.type === "!stop", `${where} / ${screenLabel}: ${action.type} but nothing to ${action.type.slice(1)} on screen`);
+      for (const t of targets) {
+        if (isPause) {
+          children.push({ op: "pause", name: `${screenLabel}: pause ${media[t].name}`, target: t });
+          paused.add(t);
+        } else if (isResume) {
+          // A start cue resumes a paused cue in QLab.
+          children.push({ op: "resume", name: `${screenLabel}: resume ${media[t].name}`, target: t });
+          paused.delete(t);
+        } else {
+          children.push(action.type === "!stop"
+            ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: t }
+            : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: action.duration, opacity: 0, stop: true });
+          removeFromScreens(onScreen, t);
+          paused.delete(t);
+        }
+      }
+    }
+
+    // 2. New media, crossfading out whatever it replaces (unless $keep).
+    if (fileName) {
+      const isCamera = fileName.toLowerCase() === "@camera";
+      const idx = media.length;
+      media.push({ name: isCamera ? "live camera" : fileName, screen });
+      if (p.label != null) {
+        assert(!labels.has(p.label), `${where}: duplicate label #${p.label}`);
+        labels.set(p.label, idx);
+      }
+      if (isCamera || p.loop || IMAGE_EXTENSIONS.test(fileName)) {
+        endless.push(media[idx].name);
+      }
+
+      const fade = p.fade ?? QLAB_DEFAULT_FADE;
+      const replaced = p.keep ? [] : [...onScreen[screen]];
+      children.push({
+        op: isCamera ? "camera" : "video",
+        name: `${screenLabel}: ${media[idx].name}`,
+        file: isCamera ? "" : fileName,
+        stage,
+        media: idx,
+        opacity: fade > 0 ? 0 : 1,
+        loop: p.loop,
+        layer: p.layer,
+      });
+      if (fade > 0) {
+        children.push({ op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
+      }
+      for (const t of replaced) {
+        children.push({ op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
+        removeFromScreens(onScreen, t);
+        paused.delete(t);
+      }
+      onScreen[screen].push(idx);
+    }
   }
-  return s;
+  return { children, delay, endless };
+}
+
+// Still images play until stopped in QLab, so a group showing one never ends.
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|bmp|tiff?|heic|psd|webp)$/i;
+
+/** True if the row has a file or params in the given video screen column (any screen if omitted). */
+function hasVideo(row, screen) {
+  const screens = screen == null ? Object.keys(QLAB_SCREENS) : [screen];
+  return screens.some(s => row.tracks[s]?.file != null || row.tracks[s]?.params != null);
+}
+
+/**
+ * Groups the rows into the cues MultiPlay triggers, each with the auto-cue rows that follow it up to the next
+ * triggered cue: [{ cue, autos: [...] }].
+ */
+function groupAutoCues(cues) {
+  const groups = [];
+  for (const cue of cues) {
+    if (!isAutoCue(cue)) {
+      groups.push({ cue, autos: [] });
+    } else if (groups.length > 0) {
+      groups[groups.length - 1].autos.push(cue);
+    } else {
+      assert(!hasVideo(cue), `row "${cue.description ?? ""}" has video, but no cue number and no earlier cue to follow`);
+    }
+  }
+  return groups;
 }
 
 /** Removes a media index from whichever screen it is currently on. */
@@ -153,6 +229,8 @@ function removeFromScreens(onScreen, idx) {
  * Control actions target media that is already running, without needing a file:
  * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
  * - `!stop [#label]`: stop immediately (blackout).
+ * - `!pause [#label]`: pause the labeled video, or everything playing on this screen (the frame stays visible).
+ * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
   const result = { label: null, fade: null, delay: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
@@ -200,14 +278,16 @@ function parseVideoParams(input, where) {
         result.hasMediaParams = true;
         break;
       case "!fade-out":
-      case "!stop": {
+      case "!stop":
+      case "!pause":
+      case "!resume": {
         const target = args[0]?.startsWith("#") ? args.shift().slice(1) : null;
         let duration = 0;
         if (name === "!fade-out") {
           assert(args.length <= 1, `${where}: usage !fade-out [#label] [<sec>]`);
           duration = args.length ? num(args[0], name) : QLAB_DEFAULT_FADE;
         } else {
-          assert(args.length === 0, `${where}: usage !stop [#label]`);
+          assert(args.length === 0, `${where}: usage ${name} [#label]`);
         }
         result.actions.push({ type: name, target, duration });
         break;
@@ -250,6 +330,7 @@ function toAppleScriptRecord(op) {
     zLoop: op.loop ? "true" : "false",
     zLayer: op.layer ?? 0,
     zPreWait: op.delay ?? 0,
+    zContinue: asString(op.continueMode || ""),
   };
   return "{" + Object.entries(v).map(([k, x]) => `${k}:${x}`).join(", ") + "}";
 }
@@ -314,6 +395,10 @@ tell application id "com.figure53.QLab.5"
         make type "Fade"
       else if k is "stop" then
         make type "Stop"
+      else if k is "pause" then
+        make type "Pause"
+      else if k is "resume" then
+        make type "Start"
       end if
       set c to last item of (selected as list)
       set q number of c to (zNum of o)
@@ -324,6 +409,9 @@ tell application id "com.figure53.QLab.5"
 
       if k is "group" then
         set pre wait of c to (zPreWait of o)
+        -- Starts the next group (an auto-cue) when this one ends, or right after it starts (after the next one's pre-wait).
+        if (zContinue of o) is "follow" then set continue mode of c to auto_follow
+        if (zContinue of o) is "continue" then set continue mode of c to auto_continue
         move cue id (uniqueID of c) of parent of c to end of theList
         set currentGroup to c
         set previousChild to missing value
