@@ -5,7 +5,7 @@ const SHOW_NAME = "RENT";
 const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\${SHOW_NAME}`;
 
 // Google Drive folder ID where generated output files and assets are stored.
-const OUTPUT_FOLDER = "1RwTI0YfCxGI4Qk3Ubm5ZenbZKnNTJEfC";
+const OUTPUT_FOLDER = "1_yVMIcbWtE49IguFixpRchhYeve1zBwg";
 
 // Patches configured in MultiPlay.
 const MULTIPLAY_LX_NETWORK_PATCH = 0;
