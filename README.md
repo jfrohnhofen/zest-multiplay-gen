@@ -8,9 +8,10 @@ An automated Google Apps Script project for theatre productions that parses mast
 
 - **Google Sheets Cue List Parser**: Reads structured cue data directly from the active Google Sheet, including multi-track headers (LX, SX, VX) and Google Drive smart link chips.
 - **MultiPlay 3.0 XML File Generator**: Outputs `.mpp` production files ready to load directly into MultiPlay.
+- **Cue Triggers**: A `Trigger` column says how each row starts: operator `go`, `continue +Ns` after the block's GO, or `follow #label +Ns` after a labeled sound or video ends (see [Cue Triggers](#cue-triggers)).
 - **Sound Cueing & Parameter DSL**:
   - File playback with local path resolution.
-  - Parameter controls: `$loop`, `$fade-in-dur`, `$fade-out-dur`, `$delay`, `$volume`, `$start-pos`, `$stop-pos`.
+  - Parameter controls: `$loop`, `$fade-in-dur`, `$fade-out-dur`, `$volume`, `$start-pos`, `$stop-pos`.
   - Cue targeting & control actions: `#label` tags, `!stop`, `!pause`, `!resume`, `!fade-out`, and `!inc-volume`.
 - **Network Cue Integration**:
   - **LX (Lighting)**: Sends Telnet login and `goto cue <X>` commands to grandMA2 consoles.
@@ -18,8 +19,8 @@ An automated Google Apps Script project for theatre productions that parses mast
 - **QLab Video Cue List Generator**: Outputs an AppleScript that rebuilds the QLab video cue list from the sheet, with cue numbers matching the MultiPlay triggers.
   - Multiple screens (QLab stages), each with its own file and params column.
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
-  - Auto-cues: rows without a cue number run in QLab by themselves, after the previous cue.
-  - Parameter controls: `$fade-dur`, `$delay`, `$loop`, `$keep`, `$layer`.
+  - Rows that follow the end of a video start in QLab by themselves.
+  - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`.
   - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
 - **Asset Bundler**: Automatically creates Google Drive shortcuts for all referenced media files inside track-specific subfolders (`sound`, `video`, etc.) in the designated output folder. Files from all video screens are collected in one `video` folder.
 - **Custom Google Sheets UI**: Adds a custom **ZEST** menu item directly to the spreadsheet toolbar for easy execution.
@@ -32,6 +33,7 @@ An automated Google Apps Script project for theatre productions that parses mast
 .
 ├── appsscript.json   # Google Apps Script manifest (V8 runtime, Sheets v4 API)
 ├── main.js           # Configuration constants, spreadsheet parser, and UI menu bindings
+├── schedule.js       # Cue triggers: trigger parser, blocks / anchors / scheduler resolution and validation
 ├── multiplay.js      # MultiPlay XML template builder & parameter DSL parser
 ├── qlab.js           # QLab AppleScript generator & video parameter DSL parser
 ├── assets.js         # Google Drive media asset bundler
@@ -50,12 +52,12 @@ The Google Sheet is structured as follows:
 
 Headers support multi-line values to denote track-specific properties (`track\nproperty`):
 
-| Cue | Pg | Scene | Description | Sound<br>File | Sound<br>Params | Lights<br>Description | Video<br>Description | SL screen<br>File | SL screen<br>Params | SR screen<br>File | SR screen<br>Params |
-|-----|----|-------|-------------|---------------|-----------------|--------------------|-------------------|-------------------|---------------------|-------------------|---------------------|
-| `1` | 5  | Sc 1  | Opening     | `track1.mp3`  | `$fade-in-dur 2` | Warm amber wash    | Title graphic     | `title.png`       | `$fade-dur 3`       | `@camera`         | `#cam`              |
+| Cue | Trigger | Pg | Scene | Description | Sound<br>File | Sound<br>Params | Lights<br>Description | Video<br>Description | SL screen<br>File | SL screen<br>Params | SR screen<br>File | SR screen<br>Params |
+|-----|---------|----|-------|-------------|---------------|-----------------|--------------------|-------------------|-------------------|---------------------|-------------------|---------------------|
+| `Q1` | `go`   | 5  | Sc 1  | Opening     | `track1.mp3`  | `$fade-in-dur 2` | Warm amber wash    | Title graphic     | `title.png`       | `$fade-dur 3`       | `@camera`         | `#cam`              |
 
-Rows without a cue number (empty, `-` or `n/a`) are not triggered by the operator: their video becomes QLab
-auto-cues and their sound fires with the previous cue (see [Auto-cues](#auto-cues)); other columns are ignored. Header names are case-insensitive.
+Every active row needs its own unique cue id (`Q12` or `Q12.5`; it is used in OSC addresses and as QLab cue number). The `Trigger` column is required and says how the row
+starts, see [Cue Triggers](#cue-triggers); rows with the trigger `skip` are ignored, and so are completely empty rows. Header names are case-insensitive.
 
 The video screen columns (`SL screen`, `SR screen`, … above) are not fixed: each screen listed in `QLAB_SCREENS`
 gets a `<Screen>\nFile` and a `<Screen>\nParams` column, using the screen's key as the first header line. For a
@@ -71,7 +73,6 @@ Sound cues support parameter controls (`$`) and cross-cue control actions (`!`) 
 - `$loop [count]` — Sets the loop count.
 - `$fade-in-dur <sec>` — Fade-in duration in seconds.
 - `$fade-out-dur <sec>` — Fade-out duration in seconds.
-- `$delay <sec>` — Pre-wait delay in seconds.
 - `$volume <dB>` — Audio volume in dB.
 - `$start-pos <sec>` — File start offset position in seconds.
 - `$stop-pos <sec>` — File stop position in seconds.
@@ -85,6 +86,53 @@ Sound cues support parameter controls (`$`) and cross-cue control actions (`!`) 
 
 ---
 
+## Cue Triggers
+
+The sheet is the single source of truth: every active row has its own unique id and produces at most one command per
+program (MultiPlay for sound and lights, QLab for video). The `Trigger` column says how the row starts:
+
+```
+trigger := skip | go | continue [+<N>s] | follow #<label> [+<N>s]
+```
+
+| Trigger | Meaning |
+|---------|---------|
+| `skip` | Ignored (deliberately disabled). |
+| `go` | The operator triggers it in MultiPlay. Has no delay. |
+| `continue [+Ns]` | Starts N s after the GO of the block's head (0 if omitted). |
+| `follow #label [+Ns]` | Starts N s after the labeled sound or video of an earlier row ends. |
+
+A **block** is a `go` row (the head) plus the non-`go` rows below it, up to the next `go`. `continue` counts from the
+head, never from the previous row, so inserting a row never shifts other timings. The first active row must be `go`.
+
+Whoever owns the anchor's media schedules the follower: sound delays live in MultiPlay, video delays in QLab.
+
+| Trigger | MultiPlay | QLab | grandMA |
+|---------|-----------|------|---------|
+| `go` | Manual cue with SX / LX / VX lines chained | Group `<id>`, started by OSC | `goto cue <id>` from MultiPlay |
+| `continue +N` | SX / LX / VX lines chained to the head, with a pre-wait | Group started via OSC | `goto cue <id>` from MultiPlay |
+| `follow` a sound | Follow-on-end after the sound, plus a pre-wait of N | Group started via OSC | `goto cue <id>` from MultiPlay |
+| `follow` a video | Nothing | Group right after the labeled one, which has auto-follow, with a pre-wait of N | Not allowed |
+
+Validation (errors with row numbers; no output is written):
+
+- `follow #label`: the label must be defined in an earlier row of the same block. Its media has to end, so images,
+  `$loop` videos, looping sounds and `@camera` are errors: use `continue +Ns` there.
+- A follower of a video is video-only (no sound, no lights).
+- No row between the labeled media and the follower may touch the follower's screens, or stop, pause or fade the
+  labeled media (for a video: or touch its screen).
+- `continue` offsets within a block must not decrease.
+- Several followers of one label are allowed. In QLab they go in an extra group `<id>-f`, so they can't have followers
+  of their own. A follow of a video waits for the end of the whole QLab group of its row, so that row can't show an image,
+  loop or camera on another screen.
+- A MultiPlay cue starts one successor, so a sound that has followers must be the last cue of its chain: no `continue`
+  row may come after the row with that sound.
+
+MultiPlay pre-waits are stored as the difference to the previous cue of the chain (hence non-decreasing offsets).
+Placeholder cues (`MULTIPLAY_OUTPUT_*_PLACEHOLDER_CUES`) are only added to `go` rows.
+
+---
+
 ## QLab Video Cues
 
 **ZEST > Generate QLab script** writes `<SHOW_NAME>.applescript` to the output folder. Copy it to the QLab Mac,
@@ -95,24 +143,8 @@ generates an AppleScript because a `.qlab5` workspace is an undocumented binary 
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
-which MultiPlay starts via OSC `/cue/<X>/start`. Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
+which MultiPlay starts via OSC `/cue/<X>/start` (rows that follow the end of a video start by themselves, see [Cue Triggers](#cue-triggers)). Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
 and fade-and-stop cues for whatever it replaces on that screen.
-
-### Auto-cues
-
-A row with video but no cue number (empty, `-` or `n/a`) becomes a group `auto-1`, `auto-2`, … (numbered through the
-whole show) that QLab starts by itself:
-
-- by default when the previous cue ends (auto-follow), e.g. the next video after a clip finishes;
-- with `$delay <sec>`, that many seconds after the previous cue starts (auto-continue plus pre-wait).
-
-The previous cue is the row above with video, triggered or auto. If the triggered cue above has no video itself,
-it gets an empty QLab group (and a MultiPlay VX trigger) for its auto-cues to follow. Images, `$loop` videos and
-`@camera` never end, so an auto-cue without `$delay` after them starts `QLAB_DEFAULT_AUTO_DELAY` seconds (default 5)
-after they start.
-
-Sound in a row without a cue number is fired by MultiPlay together with the previous cue, after the row's sound
-`$delay` (MultiPlay's pre-wait timer). It is timed independently of the row's video.
 
 ### File column
 
@@ -122,7 +154,6 @@ A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or
 
 - `#<label>` — Names the media in this cell so later cues can target it.
 - `$fade-dur <sec>` — Fade-in time of the new media and fade-out time of what it replaces (default `QLAB_DEFAULT_FADE`; `0` = cut).
-- `$delay <sec>` — Pre-wait of the whole cue (all screens in the row). On an auto-cue, counted from the start of the previous cue.
 - `$loop` — Loop the video forever.
 - `$keep` — Keep what is already on this screen and layer the new media on top.
 - `$layer <n>` — QLab video layer (higher is on top).
@@ -150,7 +181,6 @@ Production settings are managed in [main.js](main.js):
   - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list (replaced on every run).
   - `QLAB_MEDIA_FOLDER`: Media folder on the QLab Mac, relative to the workspace file or absolute (default `video`).
   - `QLAB_DEFAULT_FADE`: Default fade-in / crossfade time in seconds.
-  - `QLAB_DEFAULT_AUTO_DELAY`: Delay of an auto-cue without `$delay` after an image, loop or camera (default 5 s).
 
 ---
 

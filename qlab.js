@@ -6,14 +6,17 @@
  * deletes the previously generated cue list (named QLAB_CUE_LIST_NAME) and recreates it from scratch, so it can be
  * re-run whenever the sheet changes.
  *
- * Every sheet row with video content becomes a group cue numbered like the sheet cue (e.g. `4`), which is what
- * MultiPlay triggers via OSC `/cue/4/start`. The group fires all its children at once:
+ * Every sheet row with video content becomes a group cue numbered like the sheet cue (e.g. `4`). MultiPlay starts it
+ * via OSC `/cue/4/start` (after the row's pre-wait, see schedule.js), except for rows that follow the end of a video:
+ * QLab starts those itself, see below. The group fires all its children at once:
  *   4-1  video / image / camera cue (starts at opacity 0 when it fades in)
  *   4-2  fade cue: opacity 0 -> 1 over the fade duration
  *   4-3  fade cue: fades out and stops whatever was showing on that screen before
  *
- * Rows without a cue number (or `-` / `n/a`, see isAutoCue) become groups `auto-1`, `auto-2`, … that QLab starts by
- * itself: when the previous group ends (auto-follow), or `$delay` seconds after it starts (auto-continue).
+ * `follow #label +N` of a video: the follower's group comes right after the group of the labeled video, which has
+ * auto-follow (starts the next group when it ends), and gets a pre-wait of N s. Several followers of one group are put
+ * in an extra group `<id>-f` that the group starts. Its children are chained with auto-continue and the differences
+ * of their offsets as pre-waits, so followers can't have followers of their own then.
  *
  * Each screen (stage) has its own pair of columns, configured in QLAB_SCREENS:
  *   `<screen>\nfile`    file name or Drive smart chip, or `@camera` for a live camera cue
@@ -30,7 +33,6 @@ function generateQlab(cues) {
 
   const ctx = new Context("qlab");
 
-  const ops = [];                // flat list of cue-creation operations, consumed by the AppleScript runtime
   const state = {
     labels: new Map(),           // #label -> media index
     media: [],                   // media index -> { name, screen }
@@ -40,52 +42,73 @@ function generateQlab(cues) {
   for (const screen in QLAB_SCREENS) {
     state.onScreen[screen] = [];
   }
-  let autoCount = 0;
 
-  for (const { cue: triggered, autos } of groupAutoCues(cues, ctx)) {
-    const autosWithVideo = autos.filter(row => hasVideo(row));
-    if (!hasVideo(triggered) && autosWithVideo.length === 0) {
+  // 1. Build the group of each row with video, in sheet order (what is on each screen depends on the rows before).
+  const groups = new Map();      // row -> { group, children, endless }
+  for (const row of cues) {
+    if (!hasVideo(row)) {
       continue;
     }
-    const triggeredNumber = String(triggered.cue).trim();
-    // The number goes into the OSC address /cue/<number>/start, so no spaces, slashes or wildcard characters.
-    if (!ctx.at(triggered).check(/^[A-Za-z0-9_.]+$/.test(triggeredNumber), `has video, but its cue id can't be triggered via OSC (use letters, digits, "." and "_")`)) {
+    const number = row.cue;
+    ctx.at(row);
+    // The parsing / validation helpers below throw on the first problem in a row (see assert): report it and skip
+    // the row, so that one run reports the problems of all rows.
+    let built;
+    try {
+      built = buildVideoCue(row, "video", state);
+    } catch (e) {
+      ctx.err(e.message);
       continue;
     }
+    const group = { op: "group", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "", nested: false };
+    groups.set(row, { group, children: built.children, endless: built.endless });
+  }
 
-    // The triggered group (empty when only its auto-cues have video), then one group per auto-cue.
+  // 2. Lay out the cue list: each group is followed by the groups that follow its end.
+  const ops = [];
+  const emit = (row, delay, nested) => {
+    const { group, children, endless } = groups.get(row);
+    group.delay = delay;
+    group.nested = nested;
+    ops.push(group);
+    children.forEach((child, i) => ops.push({ ...child, number: `${group.number}-${i + 1}` }));
+
+    const followers = row.followers.filter(f => f.anchor.kind === "video" && groups.has(f))
+      .sort((a, b) => a.trigger.offset - b.trigger.offset);
+    if (followers.length === 0) {
+      return;
+    }
+    if (!ctx.at(followers[0]).check(endless.length === 0,
+      `follow #${followers[0].anchor.label}: row ${row.row} also shows ${endless.join(", ")}, which never ends, so its QLab group never ends. Use continue +Ns instead`)) {
+      return;
+    }
+    if (!ctx.check(!nested, `follow: row ${row.row} (cue ${row.cue}) is one of several followers of the same video, so it can't have followers of its own. Use continue +Ns instead`)) {
+      return;
+    }
+
+    group.continueMode = "follow"; // starts the next group when it ends
+    if (followers.length === 1) {
+      emit(followers[0], followers[0].trigger.offset, false);
+      return;
+    }
+    ops.push({ op: "group", number: `${group.number}-f`, name: `follow ${group.name || group.number}`, delay: 0, continueMode: "", nested: false });
     let previous = null;
-    for (const row of [triggered, ...autosWithVideo]) {
-      const isAuto = row !== triggered;
-      const number = isAuto ? `auto-${++autoCount}` : triggeredNumber;
-      const where = isAuto ? number : "video"; // message prefix; the row and cue id are added by the context
-      // The parsing / validation helpers below throw on the first problem in a row (see assert): report it and skip
-      // the row, so that one run reports the problems of all rows.
-      let built;
-      try {
-        built = buildVideoCue(row, where, state);
-      } catch (e) {
-        ctx.at(row).err(e.message);
-        continue;
+    let previousOffset = 0;
+    for (const follower of followers) {
+      emit(follower, follower.trigger.offset - previousOffset, true);
+      if (previous != null) {
+        previous.continueMode = "continue"; // starts the next follower when this one starts (after its pre-wait)
       }
-      const { children, endless } = built;
-      let delay = built.delay;
-
-      if (isAuto) {
-        // Waiting for images, loops or the camera to end would wait forever: start after a default delay instead.
-        if (delay == null && previous.endless.length > 0) {
-          delay = QLAB_DEFAULT_AUTO_DELAY;
-        }
-        previous.group.continueMode = delay != null
-          ? "continue"   // starts $delay seconds after the previous group starts
-          : "follow";    // starts when the previous group ends
-      }
-      const group = { op: "group", number, name: row.tracks.video?.description || row.description || "", delay: delay ?? 0, continueMode: "" };
-      ops.push(group);
-      children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
-      previous = { group, endless };
+      previous = groups.get(follower).group;
+      previousOffset = follower.trigger.offset;
+    }
+  };
+  for (const row of cues) {
+    if (groups.has(row) && row.scheduler !== "qlab") {
+      emit(row, 0, false);
     }
   }
+  ctx.at();
 
   const fill = {
     "%%SHOW%%": asString(SHOW_NAME),
@@ -99,7 +122,6 @@ function generateQlab(cues) {
   for (const [key, value] of Object.entries(fill)) {
     content = content.split(key).join(value);
   }
-  ctx.at();
   ctx.report("output not updated");
   if (ctx.hasErrors()) {
     // Do not overwrite the existing script with an incomplete / broken one.
@@ -111,12 +133,11 @@ function generateQlab(cues) {
 
 /**
  * Builds the children of one row's group, and updates what is on each screen.
- * Returns the row's $delay (or null) and the names of new media that never end on their own (images, loops, camera).
+ * Returns the children and the names of new media that never end on their own (images, loops, camera).
  */
 function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
   const children = [];
   const endless = [];
-  let delay = null;
 
   for (const screen of Object.keys(QLAB_SCREENS).filter(s => hasVideo(row, s))) {
     const { stage, label: screenLabel } = QLAB_SCREENS[screen];
@@ -124,10 +145,6 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
     const fileName = file == null ? null : (file.name ?? file).trim();
     const p = parseVideoParams(row.tracks[screen].params, `${where} / ${screenLabel}`);
 
-    if (p.delay != null) {
-      assert(delay == null || delay === p.delay, `${where}: conflicting $delay values across screens`);
-      delay = p.delay;
-    }
     assert(fileName || (p.label == null && !p.hasMediaParams), `${where} / ${screenLabel}: params for a file, but no file`);
 
     // 1. Control actions on media that is already running.
@@ -200,34 +217,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
       onScreen[screen].push(idx);
     }
   }
-  return { children, delay, endless };
-}
-
-// Still images play until stopped in QLab, so a group showing one never ends.
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|bmp|tiff?|heic|psd|webp)$/i;
-
-/** True if the row has a file or params in the given video screen column (any screen if omitted). */
-function hasVideo(row, screen) {
-  const screens = screen == null ? Object.keys(QLAB_SCREENS) : [screen];
-  return screens.some(s => row.tracks[s]?.file != null || row.tracks[s]?.params != null);
-}
-
-/**
- * Groups the rows into the cues MultiPlay triggers, each with the auto-cue rows that follow it up to the next
- * triggered cue: [{ cue, autos: [...] }].
- */
-function groupAutoCues(cues, ctx = null) {
-  const groups = [];
-  for (const cue of cues) {
-    if (!isAutoCue(cue)) {
-      groups.push({ cue, autos: [] });
-    } else if (groups.length > 0) {
-      groups[groups.length - 1].autos.push(cue);
-    } else {
-      ctx?.at(cue).check(!hasVideo(cue), "video without a cue id, and no earlier cue to follow");
-    }
-  }
-  return groups;
+  return { children, endless };
 }
 
 /** Removes a media index from whichever screen it is currently on. */
@@ -245,7 +235,6 @@ function removeFromScreens(onScreen, idx) {
  * Parameters affect the media in this cell (they require a file):
  * - `$fade-dur <sec>`: fade-in time of the new media, and fade-out time of the media it replaces
  *   (default QLAB_DEFAULT_FADE; `0` = hard cut).
- * - `$delay <sec>`: pre-wait of the whole cue (the same for all screens).
  * - `$loop`: loop the video forever.
  * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
  * - `$layer <n>`: QLab video layer (higher is on top).
@@ -257,7 +246,7 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, delay: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -281,10 +270,6 @@ function parseVideoParams(input, where) {
         assert(args.length === 1, `${where}: usage $fade-dur <sec>`);
         result.fade = num(args[0], name);
         result.hasMediaParams = true;
-        break;
-      case "$delay":
-        assert(args.length === 1, `${where}: usage $delay <sec>`);
-        result.delay = num(args[0], name);
         break;
       case "$loop":
         assert(args.length === 0, `${where}: usage $loop`);
@@ -355,6 +340,7 @@ function toAppleScriptRecord(op) {
     zLayer: op.layer ?? 0,
     zPreWait: op.delay ?? 0,
     zContinue: asString(op.continueMode || ""),
+    zNested: op.nested ? "true" : "false",
   };
   return "{" + Object.entries(v).map(([k, x]) => `${k}:${x}`).join(", ") + "}";
 }
@@ -404,6 +390,7 @@ tell application id "com.figure53.QLab.5"
       set end of mediaIDs to ""
     end repeat
     set problems to {}
+    set outerGroup to missing value
     set currentGroup to missing value
     set previousChild to missing value
 
@@ -433,10 +420,16 @@ tell application id "com.figure53.QLab.5"
 
       if k is "group" then
         set pre wait of c to (zPreWait of o)
-        -- Starts the next group (an auto-cue) when this one ends, or right after it starts (after the next one's pre-wait).
+        -- Starts the next group when this one ends ("follow"), or right after it starts ("continue", after the next one's pre-wait).
         if (zContinue of o) is "follow" then set continue mode of c to auto_follow
         if (zContinue of o) is "continue" then set continue mode of c to auto_continue
-        move cue id (uniqueID of c) of parent of c to end of theList
+        if zNested of o then
+          -- A group inside the previous top-level group (the followers of one group).
+          move cue id (uniqueID of c) of parent of c to end of outerGroup
+        else
+          move cue id (uniqueID of c) of parent of c to end of theList
+          set outerGroup to c
+        end if
         set currentGroup to c
         set previousChild to missing value
       else
