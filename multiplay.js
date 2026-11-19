@@ -21,8 +21,18 @@ function generateMultiplay(cues) {
   // Keeps track of labels assigned to sound cues that may then be referenced by sound control cues (e.g. !stop, !fade-out).
   const soundLabels = new Map();
 
+  // Cues that start a QLab group: they have video themselves, or are followed by auto-cues with video.
+  const videoCues = new Set(groupAutoCues(cues).filter(g => [g.cue, ...g.autos].some(row => hasVideo(row))).map(g => g.cue));
+
   for (const cue of cues) {
     ctx.at(cue);
+
+    // Rows without a cue id aren't triggered by the operator: their video runs in QLab (see generateQlab), and their
+    // sound fires together with the previous cue, delayed by its $delay (MultiPlay's pre-wait timer).
+    const isAuto = isAutoCue(cue);
+    if (isAuto && (!hasSound(cue) || !ctx.check(multiplayCues.length > 0, "sound without a cue id, and no earlier cue to fire with"))) {
+      continue;
+    }
 
     // Adds a single cue. One input cue (i.e. a single row in the input sheet) may corespond to multiple MultiPlay cues (e.g.
     // when a lighting and sound change are triggered in the same cue). In this case the first cue is the primary cue that displays
@@ -46,10 +56,10 @@ function generateMultiplay(cues) {
       isPrimaryCue = false;
     }
 
-    let isPrimaryCue = true;
+    let isPrimaryCue = !isAuto;
 
     // Lighting cues
-    if (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES) {
+    if (!isAuto && (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES)) {
       // Trigger a grandMA2 cue via telnet.
       addCue("LX", cue.tracks.lights ? cue.tracks.lights.description : "<placeholder>", {
         Type: 13,
@@ -113,9 +123,11 @@ function generateMultiplay(cues) {
     }
 
     // Video cues
-    if (cue.tracks.video || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES) {
+    // A QLab cue exists iff the cue has video, or auto-cues with video follow it (see generateQlab).
+    const triggersQlab = videoCues.has(cue);
+    if (!isAuto && (triggersQlab || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES)) {
       // Triggers a QLab cue by the same name / ID via OSC. The target IP / port can be set in the MultiPlay XML template.
-      addCue("VX", cue.tracks.video ? cue.tracks.video.description : "<placeholder>", {
+      addCue("VX", triggersQlab ? cue.tracks.video?.description : "<placeholder>", {
         Type: 13,
         Patch: MULTIPLAY_VX_NETWORK_PATCH,
         Messages: [{
@@ -129,7 +141,7 @@ function generateMultiplay(cues) {
       });
     }
 
-    ctx.check(!isPrimaryCue, "cue has no action");
+    ctx.check(isAuto || !isPrimaryCue, "cue has no action");
   }
   ctx.at();
 

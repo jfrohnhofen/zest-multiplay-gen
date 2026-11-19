@@ -15,6 +15,27 @@ const MULTIPLAY_VX_NETWORK_PATCH = 1;
 const MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES = true;
 const MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES = false;
 
+// QLab video screens. Keys are the (lower-case) first header line of the sheet's video columns: each screen has
+// a `<screen>\nfile` and a `<screen>\nparams` column. `stage` is the name of the QLab video stage it plays on.
+// `label` is a short screen name used in the QLab cue names.
+const QLAB_SCREENS = {
+  "sl screen": { stage: "Window", label: "Window" },
+  "sr screen": { stage: "Fence", label: "Fence" },
+  "projector": { stage: "Projector", label: "Projector" },
+};
+
+// Name of the QLab cue list the generated script (re)creates. Anything in it is replaced on every run.
+const QLAB_CUE_LIST_NAME = "ZEST - RENT - video";
+
+// Folder with the video / image files on the QLab Mac, relative to the workspace file (or an absolute path).
+const QLAB_MEDIA_FOLDER = "video";
+
+// Default fade-in / crossfade time in seconds when a cell has no $fade-dur.
+const QLAB_DEFAULT_FADE = 1;
+
+// Delay in seconds of an auto-cue without $delay after an image, a loop or the camera (which never end by themselves).
+const QLAB_DEFAULT_AUTO_DELAY = 5;
+
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
  * 
@@ -84,12 +105,15 @@ function parseCuelist() {
       cue.cue = cue.cue.trim();
     }
 
-    // Rows with the cue id "N/A" are explicitly ignored. Rows without a cue id are ignored with a warning.
-    if (typeof cue.cue === "string" && cue.cue.toUpperCase() === "N/A") {
-      continue;
-    }
-    if (!cue.cue) {
-      ctx.at(cue).warn("missing cue id, ignoring row (use n/a to silence this warning)");
+    // Rows without a cue id (empty, "-" or "n/a") aren't triggered by the operator. If they have video or sound, they
+    // run automatically after the previous cue (auto-cues, see isAutoCue). Otherwise they are ignored, with a warning
+    // if the cue id is empty.
+    if (isAutoCue(cue)) {
+      if (hasVideo(cue) || hasSound(cue)) {
+        cues.push(cue);
+      } else if (!cue.cue) {
+        ctx.at(cue).warn("missing cue id, ignoring row (use n/a to silence this warning)");
+      }
       continue;
     }
 
@@ -109,6 +133,19 @@ function parseCuelist() {
   return ctx.hasErrors() ? null : cues;
 }
 
+/**
+ * True for rows that MultiPlay doesn't trigger: no cue id, `-` or `n/a`. QLab runs their video automatically after
+ * the previous cue (see generateQlab), and MultiPlay fires their sound with the previous cue (see generateMultiplay).
+ */
+function isAutoCue(cue) {
+  return ["", "-", "n/a"].includes(String(cue.cue ?? "").trim().toLowerCase());
+}
+
+/** True if the row has a sound file or sound params. */
+function hasSound(cue) {
+  return cue.tracks.sound?.file != null || cue.tracks.sound?.params != null;
+}
+
 /** Converts a 0-based column index to a sheet column letter (0 -> A, 26 -> AA). */
 function columnLetter(i) {
   let letters = "";
@@ -125,6 +162,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("ZEST")
     .addItem("Generate MultiPlay file", "generateMultiplay")
+    .addItem("Generate QLab script", "generateQlab")
     .addItem("Bundle assets", "bundleAssets")
     .addItem("Everything Everywhere All at Once", "updateAll")
     .addToUi();
@@ -133,10 +171,11 @@ function onOpen() {
 /**
  * Master generator function ("Everything Everywhere All at Once").
  * Parses the cuelist once and triggers MultiPlay production generation,
- * and asset bundling.
+ * QLab script generation and asset bundling.
  */
 function updateAll() {
   const cues = parseCuelist();
   generateMultiplay(cues);
+  generateQlab(cues);
   bundleAssets(cues);
 }

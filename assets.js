@@ -6,7 +6,8 @@
  * nothing to bundle, the existing output is left untouched.
  *
  * Otherwise clears any existing subfolders in the target Google Drive output directory (`OUTPUT_FOLDER`) and creates
- * Drive shortcuts to the files within corresponding track subfolders (e.g. sound, video).
+ * Drive shortcuts to the files within corresponding track subfolders (e.g. sound, video). Files from all video screens
+ * go into one QLAB_MEDIA_FOLDER subfolder.
  */
 function bundleAssets(cues) {
   cues = cues ?? parseCuelist();
@@ -28,16 +29,22 @@ function bundleAssets(cues) {
       if (file == null) {
         continue;
       }
+      // Live camera cues (see generateQlab) have no file to bundle.
+      if (QLAB_SCREENS[track] && String(file.name ?? file).trim().toLowerCase() === "@camera") {
+        continue;
+      }
 
       const id = file.uri?.match(/[-\w]{25,}/)?.[0];
       if (!ctx.check(id != null, `${track} file "${file.name ?? file}" is not a link to a Google Drive file`)) {
         continue;
       }
 
-      if (!tracks.has(track)) {
-        tracks.set(track, new Set());
+      // All video screens share one folder, matching QLAB_MEDIA_FOLDER on the QLab Mac.
+      const folderName = QLAB_SCREENS[track] ? QLAB_MEDIA_FOLDER : track;
+      if (!tracks.has(folderName)) {
+        tracks.set(folderName, new Set());
       }
-      tracks.get(track).add(id);
+      tracks.get(folderName).add(id);
     }
   }
   ctx.at();
