@@ -62,7 +62,12 @@ function generateQlab(cues) {
       continue;
     }
     ops.push({ op: "group", key: row.cue, number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
-    children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
+    // The children are chained with auto-continue, so they all start together with the group.
+    children.forEach((child, i) => ops.push({
+      ...child,
+      number: `${number}-${i + 1}`,
+      continueMode: i < children.length - 1 ? "continue" : "",
+    }));
   }
 
   const fill = {
@@ -350,7 +355,6 @@ tell application id "com.figure53.QLab.5"
     end repeat
     set problems to {}
     set currentGroup to missing value
-    set previousChild to missing value
 
     repeat with o in ops
       set k to zKind of o
@@ -377,14 +381,14 @@ tell application id "com.figure53.QLab.5"
         set end of problems to "cue number " & (zNum of o) & " is already used elsewhere in the workspace"
       end if
 
+      -- Starts the next cue when this one ends ("follow"), or right after it starts ("continue", after the next one's pre-wait).
+      if (zContinue of o) is "follow" then set continue mode of c to auto_follow
+      if (zContinue of o) is "continue" then set continue mode of c to auto_continue
+
       if k is "group" then
         set pre wait of c to (zPreWait of o)
-        -- Starts the next group (an auto-cue) when this one ends, or right after it starts (after the next one's pre-wait).
-        if (zContinue of o) is "follow" then set continue mode of c to auto_follow
-        if (zContinue of o) is "continue" then set continue mode of c to auto_continue
         move cue id (uniqueID of c) of parent of c to end of theList
         set currentGroup to c
-        set previousChild to missing value
       else
         if k is "video" or k is "camera" then
           if k is "video" then
@@ -415,9 +419,6 @@ tell application id "com.figure53.QLab.5"
           end if
         end if
         move cue id (uniqueID of c) of parent of c to end of currentGroup
-        -- Chain the group's children with auto-continue so they all fire together.
-        if previousChild is not missing value then set continue mode of previousChild to auto_continue
-        set previousChild to c
       end if
     end repeat
 
