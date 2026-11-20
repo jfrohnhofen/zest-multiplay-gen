@@ -10,7 +10,7 @@ const MULTIPLAY_ADVANCE = {
 
 /**
  * Generates a MultiPlay production XML file (`<SHOW_NAME>.mpp`) containing all audio, lighting, and video cues.
- * 
+ *
  * Constructs MultiPlay cue objects (audio files, telnet commands for lights, OSC messages for video),
  * formats their advance triggers, audio channels, and patch assignments, and saves the output to Drive.
  *
@@ -249,8 +249,8 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
  * - `$fade-out-dur <sec>`: Fade out duration in seconds.
  * - `$volume <dB>`: Volume level in dB.
  * - `$start-pos <sec>`: File start position in seconds.
- * - `$stop-pos <sec>`: File stop position in seconds. 
- * 
+ * - `$stop-pos <sec>`: File stop position in seconds.
+ *
  * Control actions target another cue:
  * - `!stop <target_label>`: Stop control cue targeting labeled cue.
  * - `!pause <target_label>`: Pause control cue targeting labeled cue.
@@ -301,8 +301,6 @@ function parseParams(input, labels, ctx) {
         params.Fade.$AtEnd = -1;
         break;
 
-
-
       case "$volume":
         if (!checkArgs(1)) break;
         params["Volume-dB"] = args[0];
@@ -326,11 +324,11 @@ function parseParams(input, labels, ctx) {
       case "!fade-out":
         const action = { "!stop": 1,"!pause": 2,"!resume": 3,"!fade-out": 13 }[name];
         assert(action != null);
-        
+
         if (!checkArgs(1)) break;
         const target = labels.get(args[0]);
         if (!ctx.check(target != null, `${name} refers to unknown label "${args[0]}"`)) break;
-        
+
         actions.push({
           Type: 5,
           Control: { $Action: action, $Target: target },
@@ -348,12 +346,12 @@ function parseParams(input, labels, ctx) {
           Control: { $Action: 4, $Target: volTarget, $EndValue: change, $FadeTime: args[2] * 1000, $RelativeFade: -1},
         });
         break;
-      
+
       default:
         ctx.err(`invalid param "${name}"`);
     }
   }
-  
+
   return {label, params, actions};
 }
 
