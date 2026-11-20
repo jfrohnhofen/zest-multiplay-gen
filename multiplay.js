@@ -1,8 +1,32 @@
 /**
+ * What a cue does when it is triggered, i.e. the `Advance` of its MultiPlay cue (`$Action`). A cue can start only one
+ * successor, so MultiPlay chains cues: each cue starts the next one in the list.
+ */
+const MULTIPLAY_ADVANCE = {
+  MANUAL: 1,  // wait for the operator's GO
+  WITH: 2,    // start the next cue together with this one (after this cue's pre-wait)
+  ON_END: 4,  // start the next cue when this one ends (follow-on-end)
+};
+
+// Colours (RRGGBB) of the cues in MultiPlay's cue list: the cue the operator starts with GO (the first line of a `go`
+// row, the head of a block) stands out from all others, which start by themselves. R and B are equal so that the colours look the same in either byte order.
+const MULTIPLAY_GO_APPEARANCE = { $BGColour: "006000", $FontColour: "FFFFFF" };
+const MULTIPLAY_AUTO_APPEARANCE = { $BGColour: "202020", $FontColour: "FFFFFF" };
+
+/**
  * Generates a MultiPlay production XML file (`<SHOW_NAME>.mpp`) containing all audio, lighting, and video cues.
- * 
+ *
  * Constructs MultiPlay cue objects (audio files, telnet commands for lights, OSC messages for video),
  * formats their advance triggers, audio channels, and patch assignments, and saves the output to Drive.
+ *
+ * Each sheet row becomes one or multiple lines (LX, SX, VX, ...), chained to start together. How a row starts depends on its
+ * trigger (see schedule.js):
+ * - `go`: the first line is a manual cue the operator triggers. Rows of the same block follow in the same chain.
+ * - `continue +N`: its lines are chained after the head's, with a pre-wait so that they start N s after the head's GO.
+ *   A pre-wait counts from the start of the previous cue of the chain, so the chain stores the differences between
+ *   the offsets of consecutive rows (offsets of a block must not decrease).
+ * - `follow #sound +N`: its lines are chained right after the labeled sound, whose advance is follow-on-end, with a
+ *   pre-wait of N s. A cue starts one successor only, so the labeled sound has to be the last cue of its chain.
  */
 function generateMultiplay(cues) {
   cues = cues ?? parseCuelist();
@@ -15,133 +39,56 @@ function generateMultiplay(cues) {
 
   const ctx = new Context("multiplay");
 
-  let nextUid = 1;
-  let multiplayCues = [];
-
   // Keeps track of labels assigned to sound cues that may then be referenced by sound control cues (e.g. !stop, !fade-out).
   const soundLabels = new Map();
 
-  // Cues that start a QLab group: they have video themselves, or are followed by auto-cues with video.
-  const videoCues = new Set(groupAutoCues(cues).filter(g => [g.cue, ...g.autos].some(row => hasVideo(row))).map(g => g.cue));
-
+  // 1. The lines of each row that MultiPlay schedules.
+  const rowLines = new Map();
   for (const cue of cues) {
     ctx.at(cue);
+    const lines = buildMultiplayLines(cue, soundLabels, ctx);
+    ctx.check(lines.length > 0, "cue has no action");
+    rowLines.set(cue, lines);
+  }
 
-    // Rows without a cue id aren't triggered by the operator: their video runs in QLab (see generateQlab), and their
-    // sound fires together with the previous cue, delayed by its $delay (MultiPlay's pre-wait timer).
-    const isAuto = isAutoCue(cue);
-    if (isAuto && (!hasSound(cue) || !ctx.check(multiplayCues.length > 0, "sound without a cue id, and no earlier cue to fire with"))) {
-      continue;
-    }
-
-    // Adds a single cue. One input cue (i.e. a single row in the input sheet) may corespond to multiple MultiPlay cues (e.g.
-    // when a lighting and sound change are triggered in the same cue). In this case the first cue is the primary cue that displays
-    // a cue number, page numer, description, line / word / action etc. All other cues - while displayed as separate cues / lines in
-    // MultiPlay - will trigger together with the primary cue.
-    function addCue(abbr, descr, params) {
-      if (!isPrimaryCue) {
-        // Ensures that this cue triggers with the previous cue (see above for details).
-        multiplayCues[multiplayCues.length - 1].Advance.$Action = 2;
-      }
-  
-      multiplayCues.push({...params, ...{
-          UID: nextUid++,
-          Q: isPrimaryCue ? `${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
-          ScriptRef: isPrimaryCue ? cue.description : "",
-          Description: abbr + (descr ? ` - ${descr}` : ""),
-          Advance: { $Action: 1, $Target: 0 },
-          Appearance: { $BGColour: "202020", $FontColour: "FFFFFF" },
-      }});
-    
-      isPrimaryCue = false;
-    }
-
-    let isPrimaryCue = !isAuto;
-
-    // Lighting cues
-    if (!isAuto && (cue.tracks.lights || MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES)) {
-      // Trigger a grandMA2 cue via telnet.
-      addCue("LX", cue.tracks.lights ? cue.tracks.lights.description : "<placeholder>", {
-        Type: 13,
-        Patch: MULTIPLAY_LX_NETWORK_PATCH,
-        Messages: {
-          $Interval: 10,
-          Msg: [{
-            $Data: "login administrator admin",
-            $Format: 0,
-            $AddCR: -1,
-            $AddLF: -1,
-          },
-          {
-            $Data: `goto cue ${cue.cue}`,
-            $Format: 0,
-            $AddCR: -1,
-            $AddLF: -1,
-          }],
-        },
-      });
-    }
-
-    // Sound cues
-    if (cue.tracks.sound) {
-      // Generates an audio cue iff a sound file is linked in the file column.
-      // In addition, generates a control cue for each control action in the params column (see parseParams for details).
-      const {label, params, actions} = parseParams(cue.tracks.sound.params, soundLabels, ctx);
-      const file = cue.tracks.sound.file;
-      const hasFile = file != null;
-      const hasLabel = label != null;
-      const hasParams = Object.keys(params).length > 0;
-
-      // The file has to be a link (smart chip), as opposed to plain text.
-      const hasValidFile = hasFile && ctx.check(file.name != null, `sound file "${file}" is not a link to a file`);
-
-      // The params need an audio cue / file to apply to.
-      ctx.check(hasFile || !hasParams, "sound has params, but no file");
-      // The label needs an audio cue / file to apply to.
-      ctx.check(hasFile || !hasLabel, `sound has label #${label}, but no file`);
-      if (!hasFile && !hasParams && !hasLabel && actions.length === 0) {
-        ctx.warn("sound has neither file nor actions, and does nothing");
-      }
-
-      if (hasLabel && ctx.check(!soundLabels.has(label), `duplicate label #${label}`)) {
-        soundLabels.set(label, nextUid);
-      }
-
-      if (hasValidFile) {
-        addCue("SX", cue.tracks.sound.description, {...{
-          Type: 0,
-          File: {
-            $Name: `${LOCAL_FOLDER}\\sound\\${file.name}`,
-          },
-          AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
-        }, ...params});
-      }
-
-      for (const action of actions) {
-        addCue("SX", cue.tracks.sound.description, action);
+  // 2. The cue list: one chain per block (head and continue rows), followed by the chains of the rows that follow a
+  // sound of the block, each right after that sound.
+  const list = [];
+  const layoutChain = rows => {
+    rows = rows.filter(row => rowLines.get(row)?.length > 0);
+    let previousOffset = 0;
+    for (const [i, row] of rows.entries()) {
+      const lines = rowLines.get(row);
+      const delay = row.trigger.offset - previousOffset;
+      previousOffset = row.trigger.offset;
+      lines[0].isFirst = true;
+      lines[0].preWait = delay;
+      for (const [k, line] of lines.entries()) {
+        const isLast = i === rows.length - 1 && k === lines.length - 1;
+        line.advance = isLast ? MULTIPLAY_ADVANCE.MANUAL : MULTIPLAY_ADVANCE.WITH;
+        list.push(line);
       }
     }
 
-    // Video cues
-    // A QLab cue exists iff the cue has video, or auto-cues with video follow it (see generateQlab).
-    const triggersQlab = videoCues.has(cue);
-    if (!isAuto && (triggersQlab || MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES)) {
-      // Triggers a QLab cue by the same name / ID via OSC. The target IP / port can be set in the MultiPlay XML template.
-      addCue("VX", triggersQlab ? cue.tracks.video?.description : "<placeholder>", {
-        Type: 13,
-        Patch: MULTIPLAY_VX_NETWORK_PATCH,
-        Messages: [{
-          Msg: {
-            $Data: `/cue/${cue.cue}/start`,
-            $Format: 0,
-            $AddCR: 0,
-            $AddLF: 0,
-          },
-        }],
-      });
+    for (const [i, row] of rows.entries()) {
+      const followers = row.followers.filter(f => rowLines.has(f));
+      if (followers.length === 0) {
+        continue;
+      }
+      if (i < rows.length - 1) {
+        for (const follower of followers) {
+          ctx.at(follower).err(`follow #${follower.anchor.label}: the sound is in row ${row.row}, but row ${rows[i + 1].row} starts after it in the same chain. `
+            + `MultiPlay can only follow the end of the last cue of a chain: move the row with the sound to the end of the block, or use continue +Ns`);
+        }
+        continue;
+      }
+      // The sound is the last line of its row (see buildMultiplayLines), so it is the last cue of the chain.
+      rowLines.get(row).at(-1).advance = MULTIPLAY_ADVANCE.ON_END;
+      layoutChain([...followers].sort((a, b) => a.trigger.offset - b.trigger.offset));
     }
-
-    ctx.check(isAuto || !isPrimaryCue, "cue has no action");
+  };
+  for (const cue of cues.filter(c => c.trigger.kind === "go")) {
+    layoutChain(cue.block.rows.filter(row => row.trigger.kind !== "follow"));
   }
   ctx.at();
 
@@ -151,11 +98,146 @@ function generateMultiplay(cues) {
     return;
   }
 
+  // 3. Serialize.
+  list.forEach((line, i) => line.uid = i + 1);
+  const multiplayCues = list.map(line => {
+    const cue = line.row;
+    const xml = { ...line.xml };
+    const isGo = cue.trigger.kind === "go";
+    if (xml.Control && typeof xml.Control.$Target === "object") {
+      xml.Control = { ...xml.Control, $Target: xml.Control.$Target.uid };
+    }
+    if (line.preWait > 0) {
+      xml.Wait = { ...xml.Wait, $Pre: Math.round(line.preWait * 1000) };
+    }
+    return {...xml, ...{
+      UID: line.uid,
+      // The first line of a row is the primary cue that displays a cue number, page number, description, etc. The other
+      // lines are separate cues in MultiPlay that start together with it.
+      Q: line.isFirst ? `${isGo ? "" : "[AUTO] "}${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
+      ScriptRef: line.isFirst ? cue.description : "",
+      Description: line.abbr + (line.descr ? ` - ${line.descr}` : ""),
+      Advance: { $Action: line.advance, $Target: 0 },
+      Appearance: isGo && line.isFirst ? MULTIPLAY_GO_APPEARANCE : MULTIPLAY_AUTO_APPEARANCE,
+    }};
+  });
+
   const cueList = XmlService.createElement("CueList");
   toXml("Cue", multiplayCues).forEach(x => cueList.addContent(x));
   multiplay.getRootElement().addContent(cueList);
   let content = XmlService.getPrettyFormat().format(multiplay);
   getOrCreateFile(`${SHOW_NAME}.mpp`).setContent(content);
+}
+
+/**
+ * Builds the MultiPlay lines of one row: LX (grandMA cue), SX (sound file and sound control actions) and VX (QLab
+ * group), in that order. A sound that other rows follow goes last, so that it can be the last cue of its chain.
+ *
+ * A line is `{ row, abbr, descr, xml }`: `xml` is the cue's content, the rest (UID, number, advance, pre-wait) is
+ * added once the cue list is laid out.
+ */
+function buildMultiplayLines(cue, soundLabels, ctx) {
+  const lines = [];
+  const addLine = (abbr, descr, xml) => {
+    const line = { row: cue, abbr, descr, xml };
+    lines.push(line);
+    return line;
+  };
+
+  // Lighting cues. The placeholders only apply to the rows the operator triggers.
+  const isGo = cue.trigger.kind === "go";
+  if (cue.tracks.lights || (isGo && MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES)) {
+    // Trigger a grandMA2 cue via telnet.
+    addLine("LX", cue.tracks.lights ? cue.tracks.lights.description : "<placeholder>", {
+      Type: 13,
+      Patch: MULTIPLAY_LX_NETWORK_PATCH,
+      Messages: {
+        $Interval: 10,
+        Msg: [{
+          $Data: "login administrator admin",
+          $Format: 0,
+          $AddCR: -1,
+          $AddLF: -1,
+        },
+        {
+          $Data: `goto cue ${cue.cue}`,
+          $Format: 0,
+          $AddCR: -1,
+          $AddLF: -1,
+        }],
+      },
+    });
+  }
+
+  // Sound cues
+  let anchorLine = null;
+  if (cue.tracks.sound) {
+    // Generates an audio cue iff a sound file is linked in the file column.
+    // In addition, generates a control cue for each control action in the params column (see parseParams for details).
+    const {label, params, actions} = parseParams(cue.tracks.sound.params, soundLabels, ctx);
+    const file = cue.tracks.sound.file;
+    const hasFile = file != null;
+    const hasLabel = label != null;
+    const hasParams = Object.keys(params).length > 0;
+
+    // The file has to be a link (smart chip), as opposed to plain text.
+    const hasValidFile = hasFile && ctx.check(file.name != null, `sound file "${file}" is not a link to a file`);
+
+    // The params need an audio cue / file to apply to.
+    ctx.check(hasFile || !hasParams, "sound has params, but no file");
+    // The label needs an audio cue / file to apply to.
+    ctx.check(hasFile || !hasLabel, `sound has label #${label}, but no file`);
+    if (!hasFile && !hasParams && !hasLabel && actions.length === 0) {
+      ctx.warn("sound has neither file nor actions, and does nothing");
+    }
+
+    const duplicateLabel = hasLabel && !ctx.check(!soundLabels.has(label), `duplicate label #${label}`);
+
+    if (hasValidFile) {
+      const line = addLine("SX", cue.tracks.sound.description, {...{
+        Type: 0,
+        File: {
+          $Name: `${LOCAL_FOLDER}\\sound\\${file.name}`,
+        },
+        AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
+      }, ...params});
+      if (hasLabel && !duplicateLabel) {
+        soundLabels.set(label, line);
+      }
+      if (cue.followers.length > 0) {
+        anchorLine = line;
+      }
+    }
+
+    for (const action of actions) {
+      addLine("SX", cue.tracks.sound.description, action);
+    }
+  }
+
+  // Video cues
+  // A QLab group exists iff the row has video (see generateQlab). Triggers it by the same name / ID via OSC. The target
+  // IP / port can be set in the MultiPlay XML template.
+  const triggersQlab = hasVideo(cue);
+  if (triggersQlab || (isGo && MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES)) {
+    addLine("VX", triggersQlab ? cue.tracks.video?.description : "<placeholder>", {
+      Type: 13,
+      Patch: MULTIPLAY_VX_NETWORK_PATCH,
+      Messages: [{
+        Msg: {
+          $Data: `/cue/${cue.cue}/start`,
+          $Format: 0,
+          $AddCR: 0,
+          $AddLF: 0,
+        },
+      }],
+    });
+  }
+
+  if (anchorLine != null) {
+    lines.splice(lines.indexOf(anchorLine), 1);
+    lines.push(anchorLine);
+  }
+  return lines;
 }
 
 /**
@@ -167,11 +249,10 @@ function generateMultiplay(cues) {
  * - `$loop [count]`: Loop count setting.
  * - `$fade-in-dur <sec>`: Fade in duration in seconds.
  * - `$fade-out-dur <sec>`: Fade out duration in seconds.
- * - `$delay <sec>`: Pre-wait delay in seconds.
  * - `$volume <dB>`: Volume level in dB.
  * - `$start-pos <sec>`: File start position in seconds.
- * - `$stop-pos <sec>`: File stop position in seconds. 
- * 
+ * - `$stop-pos <sec>`: File stop position in seconds.
+ *
  * Control actions target another cue:
  * - `!stop <target_label>`: Stop control cue targeting labeled cue.
  * - `!pause <target_label>`: Pause control cue targeting labeled cue.
@@ -222,12 +303,6 @@ function parseParams(input, labels, ctx) {
         params.Fade.$AtEnd = -1;
         break;
 
-      case "$delay":
-        if (!checkArgs(1)) break;
-        params.Wait = params.Wait || {};
-        params.Wait.$Pre = args[0] * 1000;
-        break;
-
       case "$volume":
         if (!checkArgs(1)) break;
         params["Volume-dB"] = args[0];
@@ -251,11 +326,11 @@ function parseParams(input, labels, ctx) {
       case "!fade-out":
         const action = { "!stop": 1,"!pause": 2,"!resume": 3,"!fade-out": 13 }[name];
         assert(action != null);
-        
+
         if (!checkArgs(1)) break;
         const target = labels.get(args[0]);
         if (!ctx.check(target != null, `${name} refers to unknown label "${args[0]}"`)) break;
-        
+
         actions.push({
           Type: 5,
           Control: { $Action: action, $Target: target },
@@ -273,12 +348,12 @@ function parseParams(input, labels, ctx) {
           Control: { $Action: 4, $Target: volTarget, $EndValue: change, $FadeTime: args[2] * 1000, $RelativeFade: -1},
         });
         break;
-      
+
       default:
         ctx.err(`invalid param "${name}"`);
     }
   }
-  
+
   return {label, params, actions};
 }
 

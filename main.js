@@ -33,9 +33,6 @@ const QLAB_MEDIA_FOLDER = "video";
 // Default fade-in / crossfade time in seconds when a cell has no $fade-dur.
 const QLAB_DEFAULT_FADE = 1;
 
-// Delay in seconds of an auto-cue without $delay after an image, a loop or the camera (which never end by themselves).
-const QLAB_DEFAULT_AUTO_DELAY = 5;
-
 /**
  * Parses the active Google Sheet into an array of structured cue objects.
  * 
@@ -43,7 +40,9 @@ const QLAB_DEFAULT_AUTO_DELAY = 5;
  * (e.g. `sound\nfile` maps to `cue.tracks.sound.file`).
  * Handles rich link smart chips by extracting their URI and display name.
  *
- * Each cue carries the sheet row it was parsed from (`cue.row`, 1-based, including the header row).
+ * Each cue carries the sheet row it was parsed from (`cue.row`, 1-based, including the header row). Rows with the
+ * trigger `skip` are dropped. Every other row needs a unique id (`cue.cue`) and is annotated with how it starts
+ * (`cue.trigger`, `cue.head`, `cue.anchor`, ...), see resolveSchedule in schedule.js.
  *
  * Warnings and errors are logged via a "parse" context before returning. Returns null if there were any
  * errors, so that the generators do not run and leave existing output untouched.
@@ -102,48 +101,59 @@ function parseCuelist() {
     // +2: skip the header row, and sheet rows are 1-based.
     cue.row = rowIndex + 2;
     if (typeof cue.cue === "string") {
-      cue.cue = cue.cue.trim();
+      // Upper case everywhere (MultiPlay cue number, OSC address, QLab cue number), so that q1 and Q1 are the same id.
+      cue.cue = cue.cue.trim().toUpperCase();
     }
 
-    // Rows without a cue id (empty, "-" or "n/a") aren't triggered by the operator. If they have video or sound, they
-    // run automatically after the previous cue (auto-cues, see isAutoCue). Otherwise they are ignored, with a warning
-    // if the cue id is empty.
-    if (isAutoCue(cue)) {
-      if (hasVideo(cue) || hasSound(cue)) {
-        cues.push(cue);
-      } else if (!cue.cue) {
-        ctx.at(cue).warn("missing cue id, ignoring row (use n/a to silence this warning)");
-      }
+    // The trigger says how the row starts (see schedule.js). Skipped rows are ignored entirely, and so are rows
+    // without an id, trigger and content (e.g. spacers).
+    ctx.at(cue);
+    const hasContent = hasSound(cue) || hasVideo(cue) || cue.tracks.lights != null;
+    if (String(cue.trigger ?? "").trim() === "") {
+      ctx.check(!cue.cue && !hasContent, "missing trigger (use go, continue, follow or skip)");
+      continue;
+    }
+    cue.trigger = parseTrigger(cue.trigger, ctx);
+    if (cue.trigger.kind === "skip") {
       continue;
     }
 
-    ctx.at(cue);
+    // Every active row has its own unique id.
+    if (cue.cue === "" || cue.cue == null) {
+      if (hasContent) {
+        ctx.err("missing cue id (every active row needs a unique id, use the trigger skip to ignore a row)");
+      } else {
+        ctx.warn("missing cue id, ignoring row");
+      }
+      continue;
+    }
+    // Ids look like Q12 or Q12.5. They go into the OSC address /cue/<id>/start and are QLab cue numbers.
+    ctx.check(/^[Qq]\d+(\.\d+)?$/.test(cue.cue), `invalid cue id "${cue.cue}" (expected Q<number> or Q<number>.<number>; to ignore a row use the trigger skip)`);
     if (cueRows.has(cue.cue)) {
       ctx.err(`duplicate cue id (first used in row ${cueRows.get(cue.cue)})`);
     } else {
       cueRows.set(cue.cue, cue.row);
     }
-
     cues.push(cue);
   }
+
   ctx.at();
+  resolveSchedule(cues, ctx);
   console.log(`[parse] parsed ${cues.length} cue${cues.length === 1 ? "" : "s"}`);
 
   ctx.report("parse errors, aborting");
   return ctx.hasErrors() ? null : cues;
 }
 
-/**
- * True for rows that MultiPlay doesn't trigger: no cue id, `-` or `n/a`. QLab runs their video automatically after
- * the previous cue (see generateQlab), and MultiPlay fires their sound with the previous cue (see generateMultiplay).
- */
-function isAutoCue(cue) {
-  return ["", "-", "n/a"].includes(String(cue.cue ?? "").trim().toLowerCase());
-}
-
 /** True if the row has a sound file or sound params. */
 function hasSound(cue) {
   return cue.tracks.sound?.file != null || cue.tracks.sound?.params != null;
+}
+
+/** True if the row has a file or params in the given video screen column (any screen if omitted). */
+function hasVideo(row, screen) {
+  const screens = screen == null ? Object.keys(QLAB_SCREENS) : [screen];
+  return screens.some(s => row.tracks[s]?.file != null || row.tracks[s]?.params != null);
 }
 
 /** Converts a 0-based column index to a sheet column letter (0 -> A, 26 -> AA). */

@@ -7,13 +7,11 @@
  * re-run whenever the sheet changes.
  *
  * Every sheet row with video content becomes a group cue numbered like the sheet cue (e.g. `4`), which is what
- * MultiPlay triggers via OSC `/cue/4/start`. The group fires all its children at once:
+ * MultiPlay triggers via OSC `/cue/4/start` (after the row's pre-wait, see schedule.js). The group fires all its
+ * children at once:
  *   4-1  video / image / camera cue (starts at opacity 0 when it fades in)
  *   4-2  fade cue: opacity 0 -> 1 over the fade duration
  *   4-3  fade cue: fades out and stops whatever was showing on that screen before
- *
- * Rows without a cue number (or `-` / `n/a`, see isAutoCue) become groups `auto-1`, `auto-2`, … that QLab starts by
- * itself: when the previous group ends (auto-follow), or `$delay` seconds after it starts (auto-continue).
  *
  * Each screen (stage) has its own pair of columns, configured in QLAB_SCREENS:
  *   `<screen>\nfile`    file name or Drive smart chip, or `@camera` for a live camera cue
@@ -40,51 +38,24 @@ function generateQlab(cues) {
   for (const screen in QLAB_SCREENS) {
     state.onScreen[screen] = [];
   }
-  let autoCount = 0;
 
-  for (const { cue: triggered, autos } of groupAutoCues(cues, ctx)) {
-    const autosWithVideo = autos.filter(row => hasVideo(row));
-    if (!hasVideo(triggered) && autosWithVideo.length === 0) {
+  for (const row of cues) {
+    if (!hasVideo(row)) {
       continue;
     }
-    const triggeredNumber = String(triggered.cue).trim();
-    // The number goes into the OSC address /cue/<number>/start, so no spaces, slashes or wildcard characters.
-    if (!ctx.at(triggered).check(/^[A-Za-z0-9_.]+$/.test(triggeredNumber), `has video, but its cue id can't be triggered via OSC (use letters, digits, "." and "_")`)) {
+    // The cue id is validated when parsing (Q<number>), so it is safe in the OSC address /cue/<number>/start.
+    const number = row.cue;
+    // The parsing / validation helpers below throw on the first problem in a row (see assert): report it and skip
+    // the row, so that one run reports the problems of all rows.
+    let children;
+    try {
+      children = buildVideoCue(row, "video", state); // message prefix; the row and cue id are added by the context
+    } catch (e) {
+      ctx.at(row).err(e.message);
       continue;
     }
-
-    // The triggered group (empty when only its auto-cues have video), then one group per auto-cue.
-    let previous = null;
-    for (const row of [triggered, ...autosWithVideo]) {
-      const isAuto = row !== triggered;
-      const number = isAuto ? `auto-${++autoCount}` : triggeredNumber;
-      const where = isAuto ? number : "video"; // message prefix; the row and cue id are added by the context
-      // The parsing / validation helpers below throw on the first problem in a row (see assert): report it and skip
-      // the row, so that one run reports the problems of all rows.
-      let built;
-      try {
-        built = buildVideoCue(row, where, state);
-      } catch (e) {
-        ctx.at(row).err(e.message);
-        continue;
-      }
-      const { children, endless } = built;
-      let delay = built.delay;
-
-      if (isAuto) {
-        // Waiting for images, loops or the camera to end would wait forever: start after a default delay instead.
-        if (delay == null && previous.endless.length > 0) {
-          delay = QLAB_DEFAULT_AUTO_DELAY;
-        }
-        previous.group.continueMode = delay != null
-          ? "continue"   // starts $delay seconds after the previous group starts
-          : "follow";    // starts when the previous group ends
-      }
-      const group = { op: "group", number, name: row.tracks.video?.description || row.description || "", delay: delay ?? 0, continueMode: "" };
-      ops.push(group);
-      children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
-      previous = { group, endless };
-    }
+    ops.push({ op: "group", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
+    children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
   }
 
   const fill = {
@@ -111,12 +82,9 @@ function generateQlab(cues) {
 
 /**
  * Builds the children of one row's group, and updates what is on each screen.
- * Returns the row's $delay (or null) and the names of new media that never end on their own (images, loops, camera).
  */
 function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
   const children = [];
-  const endless = [];
-  let delay = null;
 
   for (const screen of Object.keys(QLAB_SCREENS).filter(s => hasVideo(row, s))) {
     const { stage, label: screenLabel } = QLAB_SCREENS[screen];
@@ -124,10 +92,6 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
     const fileName = file == null ? null : (file.name ?? file).trim();
     const p = parseVideoParams(row.tracks[screen].params, `${where} / ${screenLabel}`);
 
-    if (p.delay != null) {
-      assert(delay == null || delay === p.delay, `${where}: conflicting $delay values across screens`);
-      delay = p.delay;
-    }
     assert(fileName || (p.label == null && !p.hasMediaParams), `${where} / ${screenLabel}: params for a file, but no file`);
 
     // 1. Control actions on media that is already running.
@@ -173,9 +137,6 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         assert(!labels.has(p.label), `${where}: duplicate label #${p.label}`);
         labels.set(p.label, idx);
       }
-      if (isCamera || p.loop || IMAGE_EXTENSIONS.test(fileName)) {
-        endless.push(media[idx].name);
-      }
 
       const fade = p.fade ?? QLAB_DEFAULT_FADE;
       const replaced = p.keep ? [] : [...onScreen[screen]];
@@ -200,34 +161,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
       onScreen[screen].push(idx);
     }
   }
-  return { children, delay, endless };
-}
-
-// Still images play until stopped in QLab, so a group showing one never ends.
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|bmp|tiff?|heic|psd|webp)$/i;
-
-/** True if the row has a file or params in the given video screen column (any screen if omitted). */
-function hasVideo(row, screen) {
-  const screens = screen == null ? Object.keys(QLAB_SCREENS) : [screen];
-  return screens.some(s => row.tracks[s]?.file != null || row.tracks[s]?.params != null);
-}
-
-/**
- * Groups the rows into the cues MultiPlay triggers, each with the auto-cue rows that follow it up to the next
- * triggered cue: [{ cue, autos: [...] }].
- */
-function groupAutoCues(cues, ctx = null) {
-  const groups = [];
-  for (const cue of cues) {
-    if (!isAutoCue(cue)) {
-      groups.push({ cue, autos: [] });
-    } else if (groups.length > 0) {
-      groups[groups.length - 1].autos.push(cue);
-    } else {
-      ctx?.at(cue).check(!hasVideo(cue), "video without a cue id, and no earlier cue to follow");
-    }
-  }
-  return groups;
+  return children;
 }
 
 /** Removes a media index from whichever screen it is currently on. */
@@ -245,7 +179,6 @@ function removeFromScreens(onScreen, idx) {
  * Parameters affect the media in this cell (they require a file):
  * - `$fade-dur <sec>`: fade-in time of the new media, and fade-out time of the media it replaces
  *   (default QLAB_DEFAULT_FADE; `0` = hard cut).
- * - `$delay <sec>`: pre-wait of the whole cue (the same for all screens).
  * - `$loop`: loop the video forever.
  * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
  * - `$layer <n>`: QLab video layer (higher is on top).
@@ -257,7 +190,7 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, delay: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -281,10 +214,6 @@ function parseVideoParams(input, where) {
         assert(args.length === 1, `${where}: usage $fade-dur <sec>`);
         result.fade = num(args[0], name);
         result.hasMediaParams = true;
-        break;
-      case "$delay":
-        assert(args.length === 1, `${where}: usage $delay <sec>`);
-        result.delay = num(args[0], name);
         break;
       case "$loop":
         assert(args.length === 0, `${where}: usage $loop`);
