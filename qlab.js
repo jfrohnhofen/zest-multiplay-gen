@@ -92,7 +92,7 @@ function qlabScript(ops, rebuild) {
     "%%SHOW%%": asString(SHOW_NAME),
     "%%PURPOSE%%": rebuild
       ? `It deletes the cue list ${asString(QLAB_CUE_LIST_NAME)} and rebuilds it from the sheet, so it is safe to re-run.`
-      : `It updates the cue list ${asString(QLAB_CUE_LIST_NAME)} to match the sheet. It sets the values the sheet controls, and keeps everything else (e.g. geometry, effects, cues added by hand).`,
+      : `It updates the cue list ${asString(QLAB_CUE_LIST_NAME)} to match the sheet. It sets the values the sheet changed since the last run, and keeps the ones changed in QLab and everything the sheet doesn't control (e.g. geometry, effects, cues added by hand).`,
     "%%CUE_LIST%%": asString(QLAB_CUE_LIST_NAME),
     "%%MEDIA_FOLDER%%": asString(QLAB_MEDIA_FOLDER),
     "%%REBUILD%%": String(rebuild),
@@ -413,8 +413,14 @@ on extraNotes(n)
   return linefeed & my joinText(items 3 thru -1 of noteLines, linefeed)
 end extraNotes
 
--- Reads one value the sheet controls (see sheetValues in qlab.js), as text like the sheet's.
+-- Reads one value the sheet controls (see sheetValues in qlab.js), as text like the sheet's ("" if there is none).
 on getValue(c, n)
+  set v to my readValue(c, n)
+  if v is missing value then return ""
+  return v as text
+end getValue
+
+on readValue(c, n)
   tell application id "com.figure53.QLab.5"
     try
       if n is "name" then return q name of c
@@ -435,7 +441,44 @@ on getValue(c, n)
     end try
   end tell
   return ""
-end getValue
+end readValue
+
+-- The value the sheet had last time, from the second line of the Notes (see sheetValues in qlab.js), or missing value.
+on rememberedValue(n, valueName)
+  set noteLines to paragraphs of n
+  if (count of noteLines) < 2 then return missing value
+  set AppleScript's text item delimiters to "|"
+  set pairs to text items of (item 2 of noteLines)
+  set AppleScript's text item delimiters to ""
+  considering case
+    repeat with pair in pairs
+      set pairText to contents of pair
+      if pairText is (valueName & "=") then return ""
+      if pairText starts with (valueName & "=") then return text ((length of valueName) + 2) thru -1 of pairText
+    end repeat
+  end considering
+  return missing value
+end rememberedValue
+
+-- What to do with one value of an existing cue, from its value in QLab, in the sheet, and in the sheet last time
+-- (missing value if unknown): "same" (nothing to do), "set" (only the sheet changed it), "keep" (only QLab changed it)
+-- or "conflict" (both changed it).
+on decide(qlabValue, sheetValue, lastValue)
+  considering case
+    if qlabValue is sheetValue then return "same"
+    if lastValue is missing value or qlabValue is lastValue then return "set"
+    if sheetValue is lastValue then return "keep"
+  end considering
+  return "conflict"
+end decide
+
+-- A value as it is shown in dialogs: times in seconds.
+on shownValue(valueName, v)
+  if v is "" then return "nothing"
+  if valueName is in {"preWait", "duration"} then return (((v as integer) / 1000) as text) & " s"
+  if valueName is "opacity" then return ((v as integer) / 1000) as text
+  return "\\"" & v & "\\""
+end shownValue
 
 -- Sets one value the sheet controls (see sheetValues in qlab.js). Returns a problem, or "" if it worked.
 on setValue(c, n, v)
@@ -666,6 +709,8 @@ tell application id "com.figure53.QLab.5"
     end repeat
 
     set updated to 0
+    set kept to 0 -- cues with values changed in QLab that were kept
+    set conflicts to {} -- values that both the sheet and QLab changed
     repeat with d from 1 to count of ops
       set o to item d of ops
       set i to item d of reused
@@ -696,27 +741,42 @@ tell application id "com.figure53.QLab.5"
         if currentTarget is not targetID then set cue target of c to cue id targetID
       end if
 
-      -- The values the sheet controls: set the ones that differ. The Notes remember the ones that could be set.
+      -- The values the sheet controls. A value that only the sheet changed since last time is set, one that only QLab
+      -- changed is kept (see decide). The Notes remember the sheet's values, except where they couldn't be set or
+      -- where both changed, so that those come up again next time.
       set remembered to {}
       set changed to false
+      set keptAny to false
       repeat with p in (zValues of o)
         set n to item 1 of p
         set v to item 2 of p
-        set problem to ""
-        considering case
-          set same to (i is not 0) and ((my getValue(c, n)) is v)
-        end considering
-        if not same then
-          set problem to my setValue(c, n, v)
-          set changed to true
-        end if
-        if problem is "" then
-          set end of remembered to n & "=" & v
+        set remember to v
+        set lastValue to missing value
+        if i is 0 then
+          set verdict to "set"
         else
-          set end of problems to "cue " & (zNum of o) & ": " & problem
+          set qlabValue to my getValue(c, n)
+          set lastValue to my rememberedValue(item i of oldNotes, n)
+          set verdict to my decide(qlabValue, v, lastValue)
         end if
+        if verdict is "set" then
+          set problem to my setValue(c, n, v)
+          if problem is not "" then
+            set end of problems to "cue " & (zNum of o) & ": " & problem
+            set remember to lastValue
+          end if
+          set changed to true
+        else if verdict is "keep" then
+          set keptAny to true
+          if n is "file" and qlabValue is "" then set end of problems to "cue " & (zNum of o) & ": missing file " & mediaPath & "/" & v
+        else if verdict is "conflict" then
+          set end of conflicts to "cue " & (zNum of o) & " " & n & ": " & my shownValue(n, qlabValue) & " in QLab, " & my shownValue(n, v) & " in the sheet"
+          set remember to lastValue
+        end if
+        if remember is not missing value then set end of remembered to n & "=" & remember
       end repeat
       if i is not 0 and changed then set updated to updated + 1
+      if keptAny then set kept to kept + 1
       set notes of c to "zest:" & (zKey of o) & linefeed & my joinText(remembered, "|") & extra
       set end of cueKeys to (zKey of o)
       set end of cueIDs to (uniqueID of c)
@@ -766,7 +826,12 @@ tell application id "com.figure53.QLab.5"
     if rebuild then
       set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)."
     else
-      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & (count of removed) & " deleted."
+      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & (count of removed) & " deleted. " & kept & " cues keep values changed in QLab."
+      if conflicts is not {} then
+        set AppleScript's text item delimiters to return
+        set summary to summary & return & return & "Changed in both the sheet and QLab, so the QLab value was kept (the script asks again next time):" & return & (conflicts as text)
+        set AppleScript's text item delimiters to ""
+      end if
     end if
     if problems is {} then
       display dialog summary buttons {"OK"} default button 1

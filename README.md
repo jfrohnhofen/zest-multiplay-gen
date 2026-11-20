@@ -158,7 +158,12 @@ the sheet, independently of its cue number. The second line remembers the values
 The update script finds the cues it generated before by their keys, so it doesn't depend on cue numbers:
 
 - **The sheet controls** each cue's name, file, stage, opacity, loop, layer, fade duration, stop-when-done, pre-wait
-  and continue mode, and the cue numbers, targets and order. The script sets the ones that differ from the sheet.
+  and continue mode, and the cue numbers, targets and order.
+- **The second line of the Notes remembers the sheet's values from the last run.** That tells the script who changed
+  a value since then:
+  - Only the sheet changed it: the script sets the sheet's value.
+  - Only QLab changed it: the script keeps the QLab value, until the sheet changes it again.
+  - Both changed it: the script keeps the QLab value for now and lists it at the end. It comes up again next time.
 - **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
   Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
 - **New rows** get new cues. **Removed rows** have their cues deleted. A cue whose type changes (e.g. a video that
