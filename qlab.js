@@ -399,6 +399,8 @@ property duplicates : {} -- the indexes of the cues with the same key as another
 property planVerdicts : {} -- for each cue of the sheet: what to do with each of its values (see decide)
 property planLast : {} -- for each cue of the sheet: the sheet's value of each of its values last time
 property planMoved : {} -- the uniqueIDs of the existing cues that have to move
+property planQlab : {} -- for each cue of the sheet: the QLab value of each of its values (for the preview)
+property previewFile : "" -- the file with the preview of the plan, which also logs the result
 
 property problems : {}
 
@@ -642,6 +644,119 @@ on longestRisingRun(seq)
   return chosen
 end longestRisingRun
 
+-- The row id in a key (see generateQlab).
+on rowOf(k)
+  if k contains "/" then return text 1 thru ((offset of "/" in k) - 1) of k
+  return k
+end rowOf
+
+on shownNumber(n)
+  if n is "" then return "(no number)"
+  return n
+end shownNumber
+
+-- The plan as text, like a diff: a section for each row with a line for each change. Returns {the text, the number
+-- of changes}.
+on previewText()
+  set sectionKeys to {}
+  set sectionLines to {} -- for each section: its lines
+  set createdCount to 0
+  set updatedCount to 0
+  set keptCount to 0
+  set changeCount to 0
+  repeat with d from 1 to count of ops
+    set o to item d of ops
+    set i to item d of reused
+    set verdicts to item d of planVerdicts
+    set qlabValues to item d of planQlab
+    set rowLines to {}
+    if i is 0 then
+      set end of rowLines to "  + " & (zNum of o) & " " & (item 2 of item 1 of (zValues of o)) & " (new " & (zKind of o) & ")"
+      set createdCount to createdCount + 1
+    else
+      if (item i of oldNames) starts with "REMOVED " then set end of rowLines to "  ^ " & (zNum of o) & " comes back (it was marked REMOVED)"
+      considering case
+        if (item i of oldNumbers) is not (zNum of o) then set end of rowLines to "  # " & my shownNumber(item i of oldNumbers) & " -> " & (zNum of o)
+      end considering
+      if planMoved contains {item i of oldIDs} then set end of rowLines to "  > " & (zNum of o) & " moves"
+    end if
+    set anySet to false
+    set anyKept to false
+    repeat with vi from 1 to count of (zValues of o)
+      set n to item 1 of item vi of (zValues of o)
+      set v to item 2 of item vi of (zValues of o)
+      set verdict to item vi of verdicts
+      if verdict is "set" and i is not 0 then
+        set anySet to true
+        set end of rowLines to "  ~ " & (zNum of o) & " " & n & ": " & my shownValue(n, item vi of qlabValues) & " -> " & my shownValue(n, v)
+      else if verdict is "keep" then
+        set anyKept to true
+        if conflictKeys contains {(d as text) & "/" & n} then set end of rowLines to "  = " & (zNum of o) & " " & n & ": keeps " & my shownValue(n, item vi of qlabValues) & " from QLab (the sheet has " & my shownValue(n, v) & ")"
+      end if
+      if verdict is "set" and n is "file" then
+        try
+          do shell script "test -e " & quoted form of (mediaPath & "/" & v)
+        on error
+          set end of rowLines to "  ! " & (zNum of o) & " missing file " & mediaPath & "/" & v
+        end try
+      end if
+    end repeat
+    if anySet then set updatedCount to updatedCount + 1
+    if anyKept then set keptCount to keptCount + 1
+    if rowLines is not {} then
+      set s to my indexOf(sectionKeys, my rowOf(zKey of o))
+      if s is 0 then
+        set end of sectionKeys to my rowOf(zKey of o)
+        set end of sectionLines to {}
+        set s to count of sectionKeys
+      end if
+      repeat with x in rowLines
+        set end of item s of sectionLines to contents of x
+      end repeat
+    end if
+  end repeat
+
+  -- The cues that are newly marked as removed, with the row they belonged to.
+  set removedCount to 0
+  repeat with r from 1 to count of removed
+    set i to item r of removed
+    if (item i of oldNames) does not start with "REMOVED " then
+      set removedCount to removedCount + 1
+      set rowKey to my rowOf(item i of oldKeys)
+      set s to my indexOf(sectionKeys, rowKey)
+      if s is 0 then
+        set end of sectionKeys to rowKey
+        set end of sectionLines to {}
+        set s to count of sectionKeys
+      end if
+      set end of item s of sectionLines to "  - " & my shownNumber(item i of oldNumbers) & " " & (item i of oldNames) & ": marked REMOVED"
+    end if
+  end repeat
+
+  set out to {cueListName & ": " & createdCount & " cues created, " & updatedCount & " updated, " & (count of planMoved) & " moved, " & (count of accepted) & " rows renamed, " & removedCount & " marked as removed. " & keptCount & " cues keep values changed in QLab.", ""}
+  set end of out to "+ new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem"
+  repeat with s from 1 to count of sectionKeys
+    set rowKey to item s of sectionKeys
+    set header to rowKey
+    set d to my indexOf(wantedKeys, rowKey)
+    set r to my indexOf(renameTo, rowKey)
+    if r is not 0 and accepted contains {r} then
+      set header to (item r of renameFrom) & " -> " & rowKey & " (renamed)"
+    else if d is 0 then
+      set header to rowKey & " (removed from the sheet)"
+    else if (item d of reused) is 0 then
+      set header to rowKey & " (new row)"
+    end if
+    set end of out to ""
+    set end of out to header
+    repeat with x in item s of sectionLines
+      set end of out to contents of x
+      if (contents of x) does not start with "  =" and (contents of x) does not start with "  !" then set changeCount to changeCount + 1
+    end repeat
+  end repeat
+  return {my joinText(out, linefeed), changeCount}
+end previewText
+
 -- Puts the cues \`wanted\` (uniqueIDs, in sheet order) into the cue list or group in this order. Other cues in it
 -- (e.g. added by hand) stay right after the cue they follow now, and the ones before the first cue of the sheet stay
 -- first.
@@ -722,6 +837,7 @@ on planUpdate()
   -- The values.
   set planVerdicts to {}
   set planLast to {}
+  set planQlab to {}
   set conflictTexts to {}
   set conflictKeys to {}
   repeat with d from 1 to count of ops
@@ -729,6 +845,7 @@ on planUpdate()
     set i to item d of reused
     set verdicts to {}
     set lasts to {}
+    set qlabValues to {}
     if i is not 0 then
       tell application id "com.figure53.QLab.5" to tell front workspace to set c to cue id (item i of oldIDs)
     end if
@@ -738,6 +855,7 @@ on planUpdate()
       if i is 0 then
         set end of verdicts to "set"
         set end of lasts to missing value
+        set end of qlabValues to missing value
       else
         set qlabValue to my getValue(c, n)
         set lastValue to my rememberedValue(item i of oldNotes, n)
@@ -754,10 +872,12 @@ on planUpdate()
         end if
         set end of verdicts to verdict
         set end of lasts to lastValue
+        set end of qlabValues to qlabValue
       end if
     end repeat
     set end of planVerdicts to verdicts
     set end of planLast to lasts
+    set end of planQlab to qlabValues
   end repeat
 
   -- The moves. In each group (and the cue list), the existing cues of the sheet that form the longest run in sheet
@@ -913,6 +1033,28 @@ tell application id "com.figure53.QLab.5"
         end if
       end repeat
       my planUpdate()
+    end if
+
+    -- Show the plan as a preview in TextEdit, and carry it out only if approved. The preview is saved next to the
+    -- workspace (or on the Desktop) and also logs the result.
+    set previewFile to ""
+    if not rebuild then
+      set planPreview to my previewText()
+      if item 2 of planPreview is 0 then
+        display dialog "QLab cue list \\"" & cueListName & "\\" already matches the sheet, nothing to update." buttons {"OK"} default button 1
+        return
+      end if
+      if wsPath is missing value then
+        tell current application to set previewFolder to POSIX path of (path to desktop)
+        set previewFolder to text 1 thru -2 of previewFolder
+      else
+        tell current application to set previewFolder to do shell script "dirname " & quoted form of wsPath
+      end if
+      tell current application to set stamp to do shell script "date '+%Y-%m-%d %H.%M'"
+      set previewFile to previewFolder & "/" & cueListName & " update " & stamp & ".txt"
+      tell current application to do shell script "printf '%s\\\\n' " & quoted form of (item 1 of planPreview) & " > " & quoted form of previewFile & "; open -e " & quoted form of previewFile
+      activate
+      display dialog "The changes are listed in TextEdit (" & previewFile & ")." & return & return & "Apply them to the QLab cue list?" buttons {"Cancel", "Apply"} default button "Apply" cancel button "Cancel"
     end if
 
     -- Carry out the plan.
@@ -1075,11 +1217,14 @@ tell application id "com.figure53.QLab.5"
         set summary to summary & " Of " & (count of conflictTexts) & " values changed in both, " & taken & " were taken from the sheet."
       end if
     end if
+    if problems is not {} then set summary to summary & return & return & (count of problems) & " problem(s):" & return & return & my joinText(problems, return)
+    if previewFile is not "" then
+      tell current application to do shell script "printf '\\\\n%s\\\\n' " & quoted form of ("Applied: " & summary) & " >> " & quoted form of previewFile
+    end if
     if problems is {} then
       display dialog summary buttons {"OK"} default button 1
     else
-      set AppleScript's text item delimiters to return
-      display dialog summary & return & return & (count of problems) & " problem(s):" & return & return & (problems as text) buttons {"OK"} default button 1 with icon caution
+      display dialog summary buttons {"OK"} default button 1 with icon caution
     end if
   end tell
 end tell

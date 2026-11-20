@@ -175,6 +175,26 @@ The update script finds the cues it generated before by their keys, so it doesn'
   and a new row show the same files on the same screens (and no other removed or new row does), the script asks in the
   same dialog whether it was renamed. If so, its cues keep their QLab changes and get the new keys and numbers.
 
+Before changing anything, the script works out all changes and writes them, like a diff, to
+`<QLAB_CUE_LIST_NAME> update <date> <time>.txt` next to the workspace (or on the Desktop), opens it in TextEdit and
+asks whether to apply them. **Cancel** leaves the cue list unchanged. After applying, the result is added to the end of
+the file, so the files are also a log of the updates.
+
+```
+ZEST - RENT - video: 0 cues created, 1 updated, 1 moved, 0 rows renamed, 1 marked as removed. 1 cues keep values changed in QLab.
++ new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
+
+Q14
+  ~ Q14-1 file: "LOFT_A.png" -> "LOFT_B.png"
+  = Q14-2 duration: keeps 2.5 s from QLab (the sheet has 3 s)
+
+Q30
+  > Q30 moves
+
+Q40 (removed from the sheet)
+  - Q40 Window graphic: marked REMOVED
+```
+
 A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
 rebuild script once first.
 
