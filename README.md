@@ -170,6 +170,10 @@ The update script finds the cues it generated before by their keys, so it doesn'
 - **New rows** get new cues. **Removed rows** keep their cues, but switched off for you to delete: disarmed, without
   a number, red, named `REMOVED …`, and moved to the end of the cue list. If the row comes back, so do its cues. A cue
   whose type changes (e.g. a video that becomes `@camera`) is replaced, and the old one marked as removed.
+- **Moved rows** keep their keys, so their cues keep their QLab changes and move to the row's new place.
+- **Renamed rows** (a new cue id) get new keys, so they would look like a removed row plus a new one. If a removed row
+  and a new row show the same files on the same screens (and no other removed or new row does), the script asks in the
+  same dialog whether it was renamed. If so, its cues keep their QLab changes and get the new keys and numbers.
 
 A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
 rebuild script once first.

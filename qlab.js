@@ -62,7 +62,10 @@ function generateQlab(cues) {
       ctx.at(row).err(e.message);
       continue;
     }
-    ops.push({ op: "group", key: row.cue, parent: "", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
+    // The files the row shows on each screen, which tell a renamed row (new id) in the update script.
+    const files = children.filter(c => c.op === "video" || c.op === "camera")
+      .map(c => `${c.key.split("/")[1]}:${c.op === "camera" ? "@camera" : c.file}`).sort().join(",");
+    ops.push({ op: "group", key: row.cue, parent: "", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "", files });
     // The children are chained with auto-continue, so they all start together with the group.
     children.forEach((child, i) => ops.push({
       ...child,
@@ -343,6 +346,7 @@ function toAppleScriptRecord(op) {
     zParent: asString(op.parent ?? ""),
     zNum: asString(op.number),
     zTarget: asString(op.target ?? ""),
+    zFiles: asString(String(op.files ?? "").replace(/[|\r\n]+/g, " ")),
     zValues: "{" + sheetValues(op).map(([name, value]) => `{${asString(name)}, ${asString(value)}}`).join(", ") + "}",
   };
   return "{" + Object.entries(v).map(([k, x]) => `${k}:${x}`).join(", ") + "}";
@@ -369,6 +373,7 @@ property oldKeys : {}
 property oldTypes : {}
 property oldNotes : {}
 property oldParents : {} -- the uniqueID of the group or cue list each cue is in
+property problems : {}
 
 -- The index of x in the list, or 0.
 on indexOf(lst, x)
@@ -448,6 +453,47 @@ on readValue(c, n)
   end tell
   return ""
 end readValue
+
+-- Matches the cues of the sheet (ops, with their keys) to the existing ones by key. A cue is reused only if it still has
+-- the same type (e.g. a video that becomes a camera is replaced). Returns {reused, removed}: for each op the index of
+-- its existing cue (in oldIDs) or 0, and the indexes of the existing cues with a key the sheet doesn't have.
+on matchCues(ops, wantedKeys)
+  set reused to {}
+  repeat (count of ops) times
+    set end of reused to 0
+  end repeat
+  set removed to {}
+  repeat with i from 1 to count of oldIDs
+    set k to item i of oldKeys
+    if k is not "" then
+      set d to my indexOf(wantedKeys, k)
+      if d is 0 or (item i of oldTypes) is not (zType of item d of ops) then
+        set end of removed to i
+      else if (item d of reused) is not 0 then
+        tell application id "com.figure53.QLab.5" to tell front workspace to set copyNumber to q number of cue id (item i of oldIDs)
+        set end of problems to "cue " & copyNumber & " has the same key as another cue (copied in QLab?), so it is treated as added by hand"
+        set item i of oldKeys to ""
+      else
+        set item d of reused to i
+      end if
+    end if
+  end repeat
+  return {reused, removed}
+end matchCues
+
+-- A key with the row id fromRow renamed to toRow, also where it names the media of that row (see generateQlab).
+on renamedKey(k, fromRow, toRow)
+  considering case
+    if k is fromRow then return toRow
+    if k starts with (fromRow & "/") then set k to toRow & (text ((length of fromRow) + 1) thru -1 of k)
+    set AppleScript's text item delimiters to ":" & fromRow & "/"
+    set parts to text items of k
+    set AppleScript's text item delimiters to ":" & toRow & "/"
+    set k to parts as text
+    set AppleScript's text item delimiters to ""
+  end considering
+  return k
+end renamedKey
 
 -- The value the sheet had last time, from the second line of the Notes (see sheetValues in qlab.js), or missing value.
 on rememberedValue(n, valueName)
@@ -677,30 +723,47 @@ tell application id "com.figure53.QLab.5"
     end if
     set current cue list to theList
     my scanCues(theList)
-
-    -- Match the cues of the sheet to the existing ones by key. A cue is reused only if it still has the same type
-    -- (e.g. a video that becomes a camera is replaced). Existing cues with a key the sheet doesn't have are removed.
     set wantedKeys to {}
-    set reused to {} -- for each cue of the sheet: the index of its existing cue (in oldIDs), or 0
     repeat with o in ops
       set end of wantedKeys to zKey of o
-      set end of reused to 0
     end repeat
-    set removed to {} -- indexes (in oldIDs) of the cues to remove
-    repeat with i from 1 to count of oldIDs
-      set k to item i of oldKeys
-      if k is not "" then
-        set d to my indexOf(wantedKeys, k)
-        if d is 0 or (item i of oldTypes) is not (zType of item d of ops) then
-          set end of removed to i
-        else if (item d of reused) is not 0 then
-          set end of problems to "cue " & (q number of cue id (item i of oldIDs)) & " has the same key as another cue (copied in QLab?), so it is treated as added by hand"
-          set item i of oldKeys to ""
-        else
-          set item d of reused to i
+
+    -- A renamed row (new cue id) looks like a removed row plus a new one. A row group the sheet doesn't have anymore
+    -- and a new one that show the same files on the same screens are offered as a rename below, unless another removed
+    -- or new row shows the same files too. Until then, the keys of the old cues are renamed as if all were accepted.
+    set renameFrom to {}
+    set renameTo to {}
+    repeat with o in ops
+      if (zFiles of o) is not "" and oldKeys does not contain {zKey of o} then
+        set candidates to {}
+        repeat with i from 1 to count of oldIDs
+          set k to item i of oldKeys
+          if k is not "" and k does not contain "/" and wantedKeys does not contain {k} then
+            considering case
+              if my rememberedValue(item i of oldNotes, "files") is (zFiles of o) then set end of candidates to k
+            end considering
+          end if
+        end repeat
+        set twins to 0 -- new rows with the same files
+        repeat with o2 in ops
+          if (zFiles of o2) is (zFiles of o) and oldKeys does not contain {zKey of o2} then set twins to twins + 1
+        end repeat
+        if (count of candidates) is 1 and twins is 1 then
+          set end of renameFrom to item 1 of candidates
+          set end of renameTo to zKey of o
         end if
       end if
     end repeat
+    copy oldKeys to originalKeys
+    repeat with r from 1 to count of renameFrom
+      repeat with i from 1 to count of oldKeys
+        set item i of oldKeys to my renamedKey(item i of oldKeys, item r of renameFrom, item r of renameTo)
+      end repeat
+    end repeat
+
+    set matched to my matchCues(ops, wantedKeys)
+    set reused to item 1 of matched -- for each cue of the sheet: the index of its existing cue (in oldIDs), or 0
+    set removed to item 2 of matched -- indexes (in oldIDs) of the cues whose key the sheet doesn't have anymore
 
     -- Ask about the values that both the sheet and QLab changed since the last run, before changing anything.
     set conflictTexts to {}
@@ -721,13 +784,37 @@ tell application id "com.figure53.QLab.5"
         end repeat
       end if
     end repeat
+    set renameTexts to {}
+    repeat with r from 1 to count of renameFrom
+      set end of renameTexts to "Row " & (item r of renameFrom) & " was renamed to " & (item r of renameTo) & " (same files)"
+    end repeat
     set takeSheet to {} -- the conflictKeys of the values to take from the sheet
-    if conflictTexts is not {} then
-      tell current application to set picked to choose from list conflictTexts with title "Changed in both the sheet and QLab" with prompt "These values were changed in the sheet and in QLab. Select the ones to take from the sheet; the others keep their QLab value." OK button name "Update" cancel button name "Cancel" with multiple selections allowed and empty selection allowed
+    set accepted to {} -- the indexes of the accepted renames
+    if renameTexts is not {} or conflictTexts is not {} then
+      tell current application to set picked to choose from list (renameTexts & conflictTexts) with title "Check before updating" with prompt "Renamed rows (selected) keep their cues and the changes made in QLab. Unselect one to treat it as a removed row plus a new one." & return & "For values changed in the sheet and in QLab, select the ones to take from the sheet. The others keep their QLab value." default items renameTexts OK button name "Update" cancel button name "Cancel" with multiple selections allowed and empty selection allowed
       if picked is false then error number -128 -- cancelled, nothing was changed
       repeat with t in picked
-        set end of takeSheet to item (my indexOf(conflictTexts, contents of t)) of conflictKeys
+        set r to my indexOf(renameTexts, contents of t)
+        if r is not 0 then
+          set end of accepted to r
+        else
+          set end of takeSheet to item (my indexOf(conflictTexts, contents of t)) of conflictKeys
+        end if
       end repeat
+    end if
+
+    -- Renames that were not accepted: those rows are a removed row plus a new one after all.
+    if (count of accepted) < (count of renameFrom) then
+      copy originalKeys to oldKeys
+      repeat with acceptedIndex from 1 to count of accepted
+        set r to item acceptedIndex of accepted
+        repeat with i from 1 to count of oldKeys
+          set item i of oldKeys to my renamedKey(item i of oldKeys, item r of renameFrom, item r of renameTo)
+        end repeat
+      end repeat
+      set matched to my matchCues(ops, wantedKeys)
+      set reused to item 1 of matched
+      set removed to item 2 of matched
     end if
 
     -- Clear the cue numbers that change first, so that no number is still taken by another cue when it is set.
@@ -819,6 +906,7 @@ tell application id "com.figure53.QLab.5"
         end if
         if remember is not missing value then set end of remembered to n & "=" & remember
       end repeat
+      if (zFiles of o) is not "" then set end of remembered to "files=" & (zFiles of o)
       if i is not 0 and changed then set updated to updated + 1
       if keptAny then set kept to kept + 1
       set notes of c to "zest:" & (zKey of o) & linefeed & my joinText(remembered, "|") & extra
@@ -881,7 +969,7 @@ tell application id "com.figure53.QLab.5"
     if rebuild then
       set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)."
     else
-      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & newlyRemoved & " marked as removed. " & kept & " cues keep values changed in QLab."
+      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & (count of accepted) & " rows renamed, " & newlyRemoved & " marked as removed. " & kept & " cues keep values changed in QLab."
       if conflictTexts is not {} then
         set summary to summary & " Of " & (count of conflictTexts) & " values changed in both, " & (count of takeSheet) & " were taken from the sheet."
       end if
