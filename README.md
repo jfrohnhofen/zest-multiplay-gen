@@ -21,6 +21,8 @@ An automated Google Apps Script project for theatre productions that parses mast
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
   - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`.
   - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
+  - An update script that changes the existing cue list in place and keeps the changes made in QLab, after showing a
+    preview of the changes to approve (see [Updating the cue list](#updating-the-cue-list)).
 - **Asset Bundler**: Automatically creates Google Drive shortcuts for all referenced media files inside track-specific subfolders (`sound`, `video`, etc.) in the designated output folder. Files from all video screens are collected in one `video` folder.
 - **Custom Google Sheets UI**: Adds a custom **ZEST** menu item directly to the spreadsheet toolbar for easy execution.
 
@@ -184,6 +186,7 @@ files are also a log of the updates.
 
 ```
 ZEST - RENT - video: 0 cues created, 1 updated, 1 moved, 0 rows renamed, 1 marked as removed. 1 cues keep values changed in QLab.
+
 + new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
 
 Questions (to change the answers, click Change choices... in the dialog)
