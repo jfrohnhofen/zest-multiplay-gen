@@ -167,8 +167,9 @@ The update script finds the cues it generated before by their keys, so it doesn'
     The others keep their QLab value. **Cancel** stops the script without changing anything.
 - **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
   Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
-- **New rows** get new cues. **Removed rows** have their cues deleted. A cue whose type changes (e.g. a video that
-  becomes `@camera`) is replaced.
+- **New rows** get new cues. **Removed rows** keep their cues, but switched off for you to delete: disarmed, without
+  a number, red, named `REMOVED …`, and moved to the end of the cue list. If the row comes back, so do its cues. A cue
+  whose type changes (e.g. a video that becomes `@camera`) is replaced, and the old one marked as removed.
 
 A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
 rebuild script once first.

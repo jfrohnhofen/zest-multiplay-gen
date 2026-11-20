@@ -368,6 +368,7 @@ property oldIDs : {}
 property oldKeys : {}
 property oldTypes : {}
 property oldNotes : {}
+property oldParents : {} -- the uniqueID of the group or cue list each cue is in
 
 -- The index of x in the list, or 0.
 on indexOf(lst, x)
@@ -423,7 +424,12 @@ end getValue
 on readValue(c, n)
   tell application id "com.figure53.QLab.5"
     try
-      if n is "name" then return q name of c
+      if n is "name" then
+        -- Without the mark of a removed cue (see below), which goes away when its row comes back.
+        set cueName to q name of c
+        if cueName starts with "REMOVED " then return text 9 thru -1 of cueName
+        return cueName
+      end if
       if n is "continue" then
         set m to continue mode of c
         if m is auto_follow then return "follow"
@@ -541,6 +547,7 @@ on scanCues(holder)
       set end of oldKeys to k
       set end of oldTypes to q type of cc
       set end of oldNotes to n
+      set end of oldParents to uniqueID of holder
       if q type of cc is "Group" then my scanCues(cc)
     end repeat
   end tell
@@ -631,6 +638,7 @@ set oldIDs to {}
 set oldKeys to {}
 set oldTypes to {}
 set oldNotes to {}
+set oldParents to {}
 set problems to {}
 
 tell application id "com.figure53.QLab.5"
@@ -683,13 +691,11 @@ tell application id "com.figure53.QLab.5"
       set k to item i of oldKeys
       if k is not "" then
         set d to my indexOf(wantedKeys, k)
-        if d is 0 then
+        if d is 0 or (item i of oldTypes) is not (zType of item d of ops) then
           set end of removed to i
         else if (item d of reused) is not 0 then
           set end of problems to "cue " & (q number of cue id (item i of oldIDs)) & " has the same key as another cue (copied in QLab?), so it is treated as added by hand"
           set item i of oldKeys to ""
-        else if (item i of oldTypes) is not (zType of item d of ops) then
-          set end of removed to i
         else
           set item d of reused to i
         end if
@@ -750,6 +756,12 @@ tell application id "com.figure53.QLab.5"
       else
         set c to cue id (item i of oldIDs)
         set extra to my extraNotes(item i of oldNotes)
+        -- A cue of a removed row (see below) whose row is back.
+        if q name of c starts with "REMOVED " then
+          set q name of c to text 9 thru -1 of (q name of c)
+          set armed of c to true
+          set q color of c to "none"
+        end if
       end if
 
       if q number of c is not (zNum of o) then
@@ -846,19 +858,30 @@ tell application id "com.figure53.QLab.5"
       set moved to moved + (my placeCues(holder, item j of containerCues))
     end repeat
 
-    -- Delete the cues the sheet doesn't have anymore (with what is inside them, if they are groups).
+    -- The cues the sheet doesn't have anymore aren't deleted, but switched off and moved out of the way, to be deleted
+    -- by hand: disarmed, without a number (cleared above), red, named "REMOVED ...", and at the end of the cue list
+    -- (a removed group with what is inside it).
+    set removedIDs to {}
     repeat with r from 1 to count of removed
-      set removedID to item (item r of removed) of oldIDs
-      try
-        set c to cue id removedID
-        delete cue id removedID of parent of c
-      end try
+      set end of removedIDs to item (item r of removed) of oldIDs
+    end repeat
+    set newlyRemoved to 0
+    repeat with r from 1 to count of removed
+      set i to item r of removed
+      set c to cue id (item i of oldIDs)
+      if q name of c does not start with "REMOVED " then
+        set q name of c to "REMOVED " & (q name of c)
+        set newlyRemoved to newlyRemoved + 1
+      end if
+      set armed of c to false
+      set q color of c to "red"
+      if removedIDs does not contain {item i of oldParents} then my moveToEnd(item i of oldIDs, theList)
     end repeat
 
     if rebuild then
       set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)."
     else
-      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & (count of removed) & " deleted. " & kept & " cues keep values changed in QLab."
+      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & newlyRemoved & " marked as removed. " & kept & " cues keep values changed in QLab."
       if conflictTexts is not {} then
         set summary to summary & " Of " & (count of conflictTexts) & " values changed in both, " & (count of takeSheet) & " were taken from the sheet."
       end if
