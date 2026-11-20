@@ -42,7 +42,7 @@ const QLAB_DEFAULT_FADE = 1;
  *
  * Each cue carries the sheet row it was parsed from (`cue.row`, 1-based, including the header row). Rows with the
  * trigger `skip` are dropped. Every other row needs a unique id (`cue.cue`) and is annotated with how it starts
- * (`cue.trigger`, `cue.head`, `cue.anchor`, ...), see resolveSchedule in schedule.js.
+ * (`cue.trigger`, `cue.chain`, `cue.anchor`, ...), see resolveSchedule in schedule.js.
  *
  * Warnings and errors are logged via a "parse" context before returning. Returns null if there were any
  * errors, so that the generators do not run and leave existing output untouched.

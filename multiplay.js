@@ -21,12 +21,12 @@ const MULTIPLAY_AUTO_APPEARANCE = { $BGColour: "202020", $FontColour: "FFFFFF" }
  *
  * Each sheet row becomes one or multiple lines (LX, SX, VX, ...), chained to start together. How a row starts depends on its
  * trigger (see schedule.js):
- * - `go`: the first line is a manual cue the operator triggers. Rows of the same block follow in the same chain.
- * - `continue +N`: its lines are chained after the head's, with a pre-wait so that they start N s after the head's GO.
- *   A pre-wait counts from the start of the previous cue of the chain, so the chain stores the differences between
- *   the offsets of consecutive rows (offsets of a block must not decrease).
- * - `follow #sound +N`: its lines are chained right after the labeled sound, whose advance is follow-on-end, with a
- *   pre-wait of N s. A cue starts one successor only, so the labeled sound has to be the last cue of its chain.
+ * - `go`: the first line is a manual cue the operator triggers. Its chain is the `go` row and the `continue` rows below it.
+ * - `continue +N`: its lines are chained after the head's (the `go` or `follow` row above), with a pre-wait so that they
+ *   start N s after the head. A pre-wait counts from the start of the previous cue of the chain, so the chain stores the
+ *   differences between the offsets of consecutive rows (offsets of a chain must not decrease).
+ * - `follow +N`: a chain of its own, right after the sound of the row directly above, whose advance is follow-on-end.
+ *   The first pre-wait is N s. That sound is the last cue of its chain, since the follow row ends the chain.
  */
 function generateMultiplay(cues) {
   cues = cues ?? parseCuelist();
@@ -51,16 +51,17 @@ function generateMultiplay(cues) {
     rowLines.set(cue, lines);
   }
 
-  // 2. The cue list: one chain per block (head and continue rows), followed by the chains of the rows that follow a
-  // sound of the block, each right after that sound.
+  // 2. The cue list: one chain per head (a go or follow row, plus the continue rows below it). The chain of a follow
+  // row comes right after the chain that ends with the sound it follows.
   const list = [];
-  const layoutChain = rows => {
-    rows = rows.filter(row => rowLines.get(row)?.length > 0);
+  const layoutChain = chain => {
+    // Rows without lines are reported above (the output is not written), skip them here.
+    const rows = chain.rows.filter(row => rowLines.get(row).length > 0);
     let previousOffset = 0;
     for (const [i, row] of rows.entries()) {
       const lines = rowLines.get(row);
-      const delay = row.trigger.offset - previousOffset;
-      previousOffset = row.trigger.offset;
+      const delay = row.chainOffset - previousOffset;
+      previousOffset = row.chainOffset;
       lines[0].isFirst = true;
       lines[0].preWait = delay;
       for (const [k, line] of lines.entries()) {
@@ -70,25 +71,16 @@ function generateMultiplay(cues) {
       }
     }
 
-    for (const [i, row] of rows.entries()) {
-      const followers = row.followers.filter(f => rowLines.has(f));
-      if (followers.length === 0) {
-        continue;
-      }
-      if (i < rows.length - 1) {
-        for (const follower of followers) {
-          ctx.at(follower).err(`follow #${follower.anchor.label}: the sound is in row ${row.row}, but row ${rows[i + 1].row} starts after it in the same chain. `
-            + `MultiPlay can only follow the end of the last cue of a chain: move the row with the sound to the end of the block, or use continue +Ns`);
-        }
-        continue;
-      }
-      // The sound is the last line of its row (see buildMultiplayLines), so it is the last cue of the chain.
-      rowLines.get(row).at(-1).advance = MULTIPLAY_ADVANCE.ON_END;
-      layoutChain([...followers].sort((a, b) => a.trigger.offset - b.trigger.offset));
+    // The row directly above a follow row is the last row of its chain, and its sound is the last line of its row (see
+    // buildMultiplayLines), so the sound is the last cue of the chain, which is what MultiPlay can follow.
+    const last = chain.rows.at(-1);
+    if (last.follower != null && rowLines.get(last).length > 0) {
+      rowLines.get(last).at(-1).advance = MULTIPLAY_ADVANCE.ON_END;
+      layoutChain(last.follower.chain);
     }
   };
   for (const cue of cues.filter(c => c.trigger.kind === "go")) {
-    layoutChain(cue.block.rows.filter(row => row.trigger.kind !== "follow"));
+    layoutChain(cue.chain);
   }
   ctx.at();
 
@@ -204,7 +196,7 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
       if (hasLabel && !duplicateLabel) {
         soundLabels.set(label, line);
       }
-      if (cue.followers.length > 0) {
+      if (cue.follower != null) {
         anchorLine = line;
       }
     }

@@ -8,7 +8,7 @@ An automated Google Apps Script project for theatre productions that parses mast
 
 - **Google Sheets Cue List Parser**: Reads structured cue data directly from the active Google Sheet, including multi-track headers (LX, SX, VX) and Google Drive smart link chips.
 - **MultiPlay 3.0 XML File Generator**: Outputs `.mpp` production files ready to load directly into MultiPlay.
-- **Cue Triggers**: A `Trigger` column says how each row starts: operator `go`, `continue +Ns` after the block's GO, or `follow #label +Ns` after a labeled sound ends (see [Cue Triggers](#cue-triggers)).
+- **Cue Triggers**: A `Trigger` column says how each row starts: operator `go`, `continue +Ns` after the block's GO, or `follow +Ns` after the sound in the row above ends (see [Cue Triggers](#cue-triggers)).
 - **Sound Cueing & Parameter DSL**:
   - File playback with local path resolution.
   - Parameter controls: `$loop`, `$fade-in-dur`, `$fade-out-dur`, `$volume`, `$start-pos`, `$stop-pos`.
@@ -91,36 +91,43 @@ The sheet is the single source of truth: every active row has its own unique id 
 program (MultiPlay for sound and lights, QLab for video). The `Trigger` column says how the row starts:
 
 ```
-trigger := skip | go | continue [+<N>s] | follow #<label> [+<N>s]
+trigger := skip | go | continue [+<N>s] | follow [+<N>s]
 ```
 
 | Trigger | Meaning |
 |---------|---------|
 | `skip` | Ignored (deliberately disabled). |
 | `go` | The operator triggers it in MultiPlay. Has no delay. |
-| `continue [+Ns]` | Starts N s after the GO of the block's head (0 if omitted). |
-| `follow #label [+Ns]` | Starts N s after the labeled sound of an earlier row ends. |
+| `continue [+Ns]` | Starts N s after the start of the chain's head (0 if omitted). |
+| `follow [+Ns]` | Starts N s after the end of the sound in the row directly above (0 if omitted). |
 
-A **block** is a `go` row (the head) plus the non-`go` rows below it, up to the next `go`. `continue` counts from the
-head, never from the previous row, so inserting a row never shifts other timings. The first active row must be `go`.
+A **block** is a `go` row plus the non-`go` rows below it, up to the next `go`. The first active row must be `go`.
+A `go` or `follow` row is the head of a **chain** that includes the `continue` rows below it. `continue` counts from the
+chain's head, never from the previous row, so inserting a row never shifts other timings.
+
+```
+Q1  go             sound a.mp3, lights    the operator's GO
+Q2  continue +2    lights                 2 s after Q1
+Q3  continue +4    sound b.mp3            4 s after Q1
+Q4  follow +1      lights                 1 s after b.mp3 (the sound in Q3, the row above) ends
+Q5  continue +5    video                  5 s after Q4 starts
+```
 
 All delays live in MultiPlay (QLab groups are started via OSC); only sounds can be followed. For a video use `continue +Ns`.
 
 | Trigger | MultiPlay | QLab | grandMA |
 |---------|-----------|------|---------|
 | `go` | Manual cue with SX / LX / VX lines chained | Group `<id>`, started by OSC | `goto cue <id>` from MultiPlay |
-| `continue +N` | SX / LX / VX lines chained to the head, with a pre-wait | Group started via OSC | `goto cue <id>` from MultiPlay |
-| `follow` a sound | Follow-on-end after the sound, plus a pre-wait of N | Group started via OSC | `goto cue <id>` from MultiPlay |
+| `continue +N` | SX / LX / VX lines chained to the chain's head, with a pre-wait | Group started via OSC | `goto cue <id>` from MultiPlay |
+| `follow +N` | Follow-on-end after the sound above, plus a pre-wait of N | Group started via OSC | `goto cue <id>` from MultiPlay |
 
 Validation (errors with row numbers; no output is written):
 
-- `follow #label`: the label must be defined on a sound in an earlier row of the same block. The sound has to end, so
-  looping sounds are errors, and so is a label on a video: use `continue +Ns` there.
-- No row between the sound and the follower may stop, pause or fade the sound.
-- `continue` offsets within a block must not decrease.
-- Several followers of one label are allowed.
-- A MultiPlay cue starts one successor, so a sound that has followers must be the last cue of its chain: no `continue`
-  row may come after the row with that sound.
+- `follow`: the row directly above (the previous active row, `skip` rows don't count) must have a sound that ends, so
+  a sound without a file and looping sounds without a count are errors: use `continue +Ns` there.
+- `continue` offsets within a chain must not decrease.
+- The sound that a `follow` follows is the last cue of its chain (the `follow` row ends it), which is what MultiPlay can
+  follow: a cue starts one successor only.
 
 MultiPlay pre-waits are stored as the difference to the previous cue of the chain (hence non-decreasing offsets).
 Placeholder cues (`MULTIPLAY_OUTPUT_*_PLACEHOLDER_CUES`) are only added to `go` rows.
