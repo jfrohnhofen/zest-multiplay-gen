@@ -163,7 +163,8 @@ The update script finds the cues it generated before by their keys, so it doesn'
   a value since then:
   - Only the sheet changed it: the script sets the sheet's value.
   - Only QLab changed it: the script keeps the QLab value, until the sheet changes it again.
-  - Both changed it: the script keeps the QLab value for now and lists it at the end. It comes up again next time.
+  - Both changed it: before changing anything, the script lists these values and asks which to take from the sheet.
+    The others keep their QLab value. **Cancel** stops the script without changing anything.
 - **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
   Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
 - **New rows** get new cues. **Removed rows** have their cues deleted. A cue whose type changes (e.g. a video that

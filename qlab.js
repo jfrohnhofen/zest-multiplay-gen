@@ -696,6 +696,34 @@ tell application id "com.figure53.QLab.5"
       end if
     end repeat
 
+    -- Ask about the values that both the sheet and QLab changed since the last run, before changing anything.
+    set conflictTexts to {}
+    set conflictKeys to {} -- "<index in ops>/<value name>"
+    repeat with d from 1 to count of ops
+      set i to item d of reused
+      if i is not 0 then
+        set o to item d of ops
+        set c to cue id (item i of oldIDs)
+        repeat with p in (zValues of o)
+          set n to item 1 of p
+          set v to item 2 of p
+          set qlabValue to my getValue(c, n)
+          if my decide(qlabValue, v, my rememberedValue(item i of oldNotes, n)) is "conflict" then
+            set end of conflictTexts to (((count of conflictTexts) + 1) as text) & ". cue " & (zNum of o) & " " & n & ": " & my shownValue(n, qlabValue) & " in QLab, " & my shownValue(n, v) & " in the sheet"
+            set end of conflictKeys to (d as text) & "/" & n
+          end if
+        end repeat
+      end if
+    end repeat
+    set takeSheet to {} -- the conflictKeys of the values to take from the sheet
+    if conflictTexts is not {} then
+      tell current application to set picked to choose from list conflictTexts with title "Changed in both the sheet and QLab" with prompt "These values were changed in the sheet and in QLab. Select the ones to take from the sheet; the others keep their QLab value." OK button name "Update" cancel button name "Cancel" with multiple selections allowed and empty selection allowed
+      if picked is false then error number -128 -- cancelled, nothing was changed
+      repeat with t in picked
+        set end of takeSheet to item (my indexOf(conflictTexts, contents of t)) of conflictKeys
+      end repeat
+    end if
+
     -- Clear the cue numbers that change first, so that no number is still taken by another cue when it is set.
     repeat with r from 1 to count of removed
       set q number of cue id (item (item r of removed) of oldIDs) to ""
@@ -710,7 +738,6 @@ tell application id "com.figure53.QLab.5"
 
     set updated to 0
     set kept to 0 -- cues with values changed in QLab that were kept
-    set conflicts to {} -- values that both the sheet and QLab changed
     repeat with d from 1 to count of ops
       set o to item d of ops
       set i to item d of reused
@@ -742,8 +769,9 @@ tell application id "com.figure53.QLab.5"
       end if
 
       -- The values the sheet controls. A value that only the sheet changed since last time is set, one that only QLab
-      -- changed is kept (see decide). The Notes remember the sheet's values, except where they couldn't be set or
-      -- where both changed, so that those come up again next time.
+      -- changed is kept (see decide), and one that both changed as picked above. The Notes remember the sheet's
+      -- values (also where the QLab value is kept, so it stays until the sheet changes again), except where they
+      -- couldn't be set, so that those are tried again next time.
       set remembered to {}
       set changed to false
       set keptAny to false
@@ -758,6 +786,13 @@ tell application id "com.figure53.QLab.5"
           set qlabValue to my getValue(c, n)
           set lastValue to my rememberedValue(item i of oldNotes, n)
           set verdict to my decide(qlabValue, v, lastValue)
+          if verdict is "conflict" then
+            if takeSheet contains {(d as text) & "/" & n} then
+              set verdict to "set"
+            else
+              set verdict to "keep"
+            end if
+          end if
         end if
         if verdict is "set" then
           set problem to my setValue(c, n, v)
@@ -769,9 +804,6 @@ tell application id "com.figure53.QLab.5"
         else if verdict is "keep" then
           set keptAny to true
           if n is "file" and qlabValue is "" then set end of problems to "cue " & (zNum of o) & ": missing file " & mediaPath & "/" & v
-        else if verdict is "conflict" then
-          set end of conflicts to "cue " & (zNum of o) & " " & n & ": " & my shownValue(n, qlabValue) & " in QLab, " & my shownValue(n, v) & " in the sheet"
-          set remember to lastValue
         end if
         if remember is not missing value then set end of remembered to n & "=" & remember
       end repeat
@@ -827,10 +859,8 @@ tell application id "com.figure53.QLab.5"
       set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)."
     else
       set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & moved & " moved, " & (count of removed) & " deleted. " & kept & " cues keep values changed in QLab."
-      if conflicts is not {} then
-        set AppleScript's text item delimiters to return
-        set summary to summary & return & return & "Changed in both the sheet and QLab, so the QLab value was kept (the script asks again next time):" & return & (conflicts as text)
-        set AppleScript's text item delimiters to ""
+      if conflictTexts is not {} then
+        set summary to summary & " Of " & (count of conflictTexts) & " values changed in both, " & (count of takeSheet) & " were taken from the sheet."
       end if
     end if
     if problems is {} then
