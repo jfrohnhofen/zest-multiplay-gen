@@ -133,11 +133,16 @@ cue number.
 
 ## QLab Video Cues
 
-**ZEST > Generate QLab script** writes `<SHOW_NAME>.applescript` to the output folder. Copy it to the QLab Mac,
-open the show workspace, open the script in Script Editor and press **Run**. It deletes the cue list named
-`QLAB_CUE_LIST_NAME` and rebuilds it, so re-run it whenever the sheet changes. Missing media files, unknown stage
-names and cue numbers already used elsewhere in the workspace are listed in a dialog at the end. (The script
-generates an AppleScript because a `.qlab5` workspace is an undocumented binary format with macOS file bookmarks.)
+**ZEST > Generate QLab script** writes two AppleScripts to the output folder. Copy them to the QLab Mac, open the
+show workspace, open a script in Script Editor and press **Run**:
+
+- `<SHOW_NAME>.applescript` deletes the cue list named `QLAB_CUE_LIST_NAME` and rebuilds it from the sheet.
+- `<SHOW_NAME> update.applescript` updates that cue list in place and keeps the changes made in QLab, see
+  [Updating the cue list](#updating-the-cue-list).
+
+Missing media files, unknown stage names and cue numbers already used elsewhere in the workspace are listed in a
+dialog at the end. (The script generates an AppleScript because a `.qlab5` workspace is an undocumented binary format
+with macOS file bookmarks.)
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
@@ -147,6 +152,20 @@ and fade-and-stop cues for whatever it replaces on that screen.
 The first line of each generated cue's Notes is a key like `zest:Q12/Window/media`. It says what the cue does for
 the sheet, independently of its cue number. The second line remembers the values the sheet set, like
 `name=Window: a.mp4|file=a.mp4|opacity=0|…` (times and opacities in thousandths). Don't edit these two lines in QLab.
+
+### Updating the cue list
+
+The update script finds the cues it generated before by their keys, so it doesn't depend on cue numbers:
+
+- **The sheet controls** each cue's name, file, stage, opacity, loop, layer, fade duration, stop-when-done, pre-wait
+  and continue mode, and the cue numbers, targets and order. The script sets the ones that differ from the sheet.
+- **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
+  Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
+- **New rows** get new cues. **Removed rows** have their cues deleted. A cue whose type changes (e.g. a video that
+  becomes `@camera`) is replaced.
+
+A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
+rebuild script once first.
 
 ### File column
 
@@ -180,7 +199,7 @@ Production settings are managed in [main.js](main.js):
 - **Placeholders**: `MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES` / `MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES` add an LX / VX cue to every row, even without lighting / video content.
 - **QLab**:
   - `QLAB_SCREENS`: Video screens, keyed by the lower-case first header line of their columns. `stage` is the QLab stage name, `label` a short name used in cue names (e.g. `{ "sl screen": { stage: "SL", label: "SL" } }`).
-  - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list (replaced on every run).
+  - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list.
   - `QLAB_MEDIA_FOLDER`: Media folder on the QLab Mac, relative to the workspace file or absolute (default `video`).
   - `QLAB_DEFAULT_FADE`: Default fade-in / crossfade time in seconds.
 
@@ -265,7 +284,7 @@ clasp push
 1. Open the connected Google Sheet.
 2. Click the **ZEST** menu item in the spreadsheet menu bar:
    - **Generate MultiPlay file**: Parses the sheet and writes `<SHOW_NAME>.mpp` to Google Drive.
-   - **Generate QLab script**: Writes `<SHOW_NAME>.applescript`, which builds the QLab video cue list (see above).
+   - **Generate QLab script**: Writes `<SHOW_NAME>.applescript` and `<SHOW_NAME> update.applescript`, which build or update the QLab video cue list (see above).
    - **Bundle assets**: Organizes shortcuts to drive files into `sound/`, `video/`, etc. subfolders.
    - **Everything Everywhere All at Once**: Generates the MultiPlay file and the QLab script, and bundles assets.
 
