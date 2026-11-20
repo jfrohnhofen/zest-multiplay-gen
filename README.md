@@ -163,8 +163,7 @@ The update script finds the cues it generated before by their keys, so it doesn'
   a value since then:
   - Only the sheet changed it: the script sets the sheet's value.
   - Only QLab changed it: the script keeps the QLab value, until the sheet changes it again.
-  - Both changed it: before changing anything, the script lists these values and asks which to take from the sheet.
-    The others keep their QLab value. **Cancel** stops the script without changing anything.
+  - Both changed it: the script keeps the QLab value, unless you choose the sheet's in the preview (see below).
 - **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
   Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
 - **New rows** get new cues. **Removed rows** keep their cues, but switched off for you to delete: disarmed, without
@@ -172,17 +171,23 @@ The update script finds the cues it generated before by their keys, so it doesn'
   whose type changes (e.g. a video that becomes `@camera`) is replaced, and the old one marked as removed.
 - **Moved rows** keep their keys, so their cues keep their QLab changes and move to the row's new place.
 - **Renamed rows** (a new cue id) get new keys, so they would look like a removed row plus a new one. If a removed row
-  and a new row show the same files on the same screens (and no other removed or new row does), the script asks in the
-  same dialog whether it was renamed. If so, its cues keep their QLab changes and get the new keys and numbers.
+  and a new row show the same files on the same screens (and no other removed or new row does), the script treats it
+  as renamed, unless you choose otherwise in the preview (see below). Then its cues keep their QLab changes and get the
+  new keys and numbers.
 
 Before changing anything, the script works out all changes and writes them, like a diff, to
 `<QLAB_CUE_LIST_NAME> update <date> <time>.txt` next to the workspace (or on the Desktop), opens it in TextEdit and
-asks whether to apply them. **Cancel** leaves the cue list unchanged. After applying, the result is added to the end of
-the file, so the files are also a log of the updates.
+asks whether to apply them. The renamed rows and the values changed in both places are listed at the top as questions,
+with their current answers. **Change choices...** lets you answer them differently and shows the changes again;
+**Cancel** leaves the cue list unchanged. After applying, the result is added to the end of the last preview, so the
+files are also a log of the updates.
 
 ```
 ZEST - RENT - video: 0 cues created, 1 updated, 1 moved, 0 rows renamed, 1 marked as removed. 1 cues keep values changed in QLab.
 + new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
+
+Questions (to change the answers, click Change choices... in the dialog)
+  ? 1. cue Q14-2 duration: 2.5 s in QLab, 3 s in the sheet: keeps the QLab value
 
 Q14
   ~ Q14-1 file: "LOFT_A.png" -> "LOFT_B.png"

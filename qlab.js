@@ -385,6 +385,7 @@ property oldNames : {}
 -- Rows that look renamed (see below), and the ones accepted as renamed.
 property renameFrom : {}
 property renameTo : {}
+property renameTexts : {}
 property accepted : {}
 
 -- The values both the sheet and QLab changed, and the ones to take from the sheet (by conflictKey).
@@ -735,6 +736,28 @@ on previewText()
 
   set out to {cueListName & ": " & createdCount & " cues created, " & updatedCount & " updated, " & (count of planMoved) & " moved, " & (count of accepted) & " rows renamed, " & removedCount & " marked as removed. " & keptCount & " cues keep values changed in QLab.", ""}
   set end of out to "+ new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem"
+
+  -- The questions, with the current answers.
+  if renameTexts is not {} or conflictTexts is not {} then
+    set end of out to ""
+    set end of out to "Questions (to change the answers, click Change choices... in the dialog)"
+    repeat with r from 1 to count of renameTexts
+      if accepted contains {r} then
+        set answer to "yes, it keeps its cues"
+      else
+        set answer to "no, it is a removed row plus a new one"
+      end if
+      set end of out to "  ? " & (item r of renameTexts) & ": " & answer
+    end repeat
+    repeat with q from 1 to count of conflictTexts
+      if takeSheet contains {item q of conflictKeys} then
+        set answer to "takes the sheet's value"
+      else
+        set answer to "keeps the QLab value"
+      end if
+      set end of out to "  ? " & (item q of conflictTexts) & ": " & answer
+    end repeat
+  end if
   repeat with s from 1 to count of sectionKeys
     set rowKey to item s of sectionKeys
     set header to rowKey
@@ -939,6 +962,7 @@ set oldNumbers to {}
 set oldNames to {}
 set renameFrom to {}
 set renameTo to {}
+set renameTexts to {}
 set accepted to {}
 set conflictTexts to {}
 set conflictKeys to {}
@@ -1013,49 +1037,68 @@ tell application id "com.figure53.QLab.5"
       end if
     end repeat
 
-    -- Work out what to change (nothing is changed yet), then ask about renames and about values both changed.
-    my planUpdate()
-    set renameTexts to {}
+    -- Work out what to change (nothing is changed yet) and show it as a preview in TextEdit, with the renames and the
+    -- values both changed as questions. The plan is made again whenever the answers change, and carried out only once
+    -- it is approved. The previews are saved next to the workspace (or on the Desktop); the last one also logs the
+    -- result.
     repeat with r from 1 to count of renameFrom
       set end of renameTexts to "Row " & (item r of renameFrom) & " was renamed to " & (item r of renameTo) & " (same files)"
     end repeat
-    if renameTexts is not {} or conflictTexts is not {} then
-      tell current application to set picked to choose from list (renameTexts & conflictTexts) with title "Check before updating" with prompt "Renamed rows (selected) keep their cues and the changes made in QLab. Unselect one to treat it as a removed row plus a new one." & return & "For values changed in the sheet and in QLab, select the ones to take from the sheet. The others keep their QLab value." default items renameTexts OK button name "Update" cancel button name "Cancel" with multiple selections allowed and empty selection allowed
-      if picked is false then error number -128 -- cancelled, nothing was changed
-      set accepted to {}
-      set takeSheet to {}
-      repeat with t in picked
-        set r to my indexOf(renameTexts, contents of t)
-        if r is not 0 then
-          set end of accepted to r
-        else
-          set end of takeSheet to item (my indexOf(conflictTexts, contents of t)) of conflictKeys
-        end if
-      end repeat
-      my planUpdate()
-    end if
-
-    -- Show the plan as a preview in TextEdit, and carry it out only if approved. The preview is saved next to the
-    -- workspace (or on the Desktop) and also logs the result.
     set previewFile to ""
-    if not rebuild then
+    if wsPath is missing value then
+      tell current application to set previewFolder to POSIX path of (path to desktop)
+      set previewFolder to text 1 thru -2 of previewFolder
+    else
+      tell current application to set previewFolder to do shell script "dirname " & quoted form of wsPath
+    end if
+    repeat
+      my planUpdate()
+      if rebuild then exit repeat
       set planPreview to my previewText()
-      if item 2 of planPreview is 0 then
+      set questions to renameTexts & conflictTexts
+      if item 2 of planPreview is 0 and questions is {} then
         display dialog "QLab cue list \\"" & cueListName & "\\" already matches the sheet, nothing to update." buttons {"OK"} default button 1
         return
       end if
-      if wsPath is missing value then
-        tell current application to set previewFolder to POSIX path of (path to desktop)
-        set previewFolder to text 1 thru -2 of previewFolder
-      else
-        tell current application to set previewFolder to do shell script "dirname " & quoted form of wsPath
-      end if
-      tell current application to set stamp to do shell script "date '+%Y-%m-%d %H.%M'"
+      tell current application to set stamp to do shell script "date '+%Y-%m-%d %H.%M.%S'"
       set previewFile to previewFolder & "/" & cueListName & " update " & stamp & ".txt"
       tell current application to do shell script "printf '%s\\\\n' " & quoted form of (item 1 of planPreview) & " > " & quoted form of previewFile & "; open -e " & quoted form of previewFile
       activate
-      display dialog "The changes are listed in TextEdit (" & previewFile & ")." & return & return & "Apply them to the QLab cue list?" buttons {"Cancel", "Apply"} default button "Apply" cancel button "Cancel"
-    end if
+      set previewMessage to "The changes are listed in TextEdit (" & previewFile & ")." & return & return & "Apply them to the QLab cue list?"
+      if questions is {} then
+        display dialog previewMessage buttons {"Cancel", "Apply"} default button "Apply" cancel button "Cancel"
+        exit repeat
+      end if
+      set clicked to button returned of (display dialog previewMessage & return & return & "The questions about renamed rows and values changed both in the sheet and in QLab, with their answers, are at the top." buttons {"Cancel", "Change choices...", "Apply"} default button "Apply" cancel button "Cancel")
+      if clicked is "Apply" then exit repeat
+
+      -- Change the answers, then make the plan and the preview again.
+      set answered to {}
+      repeat with r from 1 to count of renameTexts
+        if accepted contains {r} then set end of answered to item r of renameTexts
+      end repeat
+      repeat with q from 1 to count of conflictTexts
+        if takeSheet contains {item q of conflictKeys} then set end of answered to item q of conflictTexts
+      end repeat
+      tell current application to set picked to choose from list questions with title "Change choices" with prompt "Renamed rows (selected) keep their cues and the changes made in QLab. Unselect one to treat it as a removed row plus a new one." & return & "For values changed in the sheet and in QLab, select the ones to take from the sheet. The others keep their QLab value." default items answered OK button name "Show changes" cancel button name "Back" with multiple selections allowed and empty selection allowed
+      if picked is not false then
+        set accepted to {}
+        repeat with t in picked
+          set r to my indexOf(renameTexts, contents of t)
+          if r is not 0 then set end of accepted to r
+        end repeat
+        -- Keep the answers to values that aren't asked about now (e.g. of a row that is no longer renamed).
+        set otherAnswers to {}
+        repeat with k in takeSheet
+          if conflictKeys does not contain {contents of k} then set end of otherAnswers to contents of k
+        end repeat
+        set takeSheet to otherAnswers
+        repeat with t in picked
+          set q to my indexOf(conflictTexts, contents of t)
+          if q is not 0 then set end of takeSheet to item q of conflictKeys
+        end repeat
+      end if
+    end repeat
 
     -- Carry out the plan.
     repeat with r from 1 to count of duplicates
