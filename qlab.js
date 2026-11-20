@@ -61,10 +61,11 @@ function generateQlab(cues) {
       ctx.at(row).err(e.message);
       continue;
     }
-    ops.push({ op: "group", key: row.cue, number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
+    ops.push({ op: "group", key: row.cue, parent: "", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
     // The children are chained with auto-continue, so they all start together with the group.
     children.forEach((child, i) => ops.push({
       ...child,
+      parent: row.cue,
       number: `${number}-${i + 1}`,
       continueMode: i < children.length - 1 ? "continue" : "",
     }));
@@ -74,7 +75,6 @@ function generateQlab(cues) {
     "%%SHOW%%": asString(SHOW_NAME),
     "%%CUE_LIST%%": asString(QLAB_CUE_LIST_NAME),
     "%%MEDIA_FOLDER%%": asString(QLAB_MEDIA_FOLDER),
-    "%%MEDIA_COUNT%%": String(state.media.length),
     "%%OPS%%": chunk(ops.map(toAppleScriptRecord), 50)
       .map(part => "set ops to ops & {" + part.join(", ¬\n    ") + "}").join("\n"),
   };
@@ -99,6 +99,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
   const children = [];
   // Adds a child with its key (see generateQlab). A row can't do the same thing twice, so keys are unique.
   const keys = new Set();
+  const mediaCue = t => `${media[t].key}/media`; // key of the cue that plays media t
   const add = (screenLabel, role, child) => {
     const key = `${row.cue}/${screenLabel}/${role}`;
     assert(!keys.has(key), `${where} / ${screenLabel}: ${role.split(":")[0]} of the same media twice`);
@@ -132,16 +133,16 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
       assert(targets.length > 0 || action.type === "!fade-out" || action.type === "!stop", `${where} / ${screenLabel}: ${action.type} but nothing to ${action.type.slice(1)} on screen`);
       for (const t of targets) {
         if (isPause) {
-          add(screenLabel, `pause:${media[t].key}`, { op: "pause", name: `${screenLabel}: pause ${media[t].name}`, target: t });
+          add(screenLabel, `pause:${media[t].key}`, { op: "pause", name: `${screenLabel}: pause ${media[t].name}`, target: mediaCue(t) });
           paused.add(t);
         } else if (isResume) {
           // A start cue resumes a paused cue in QLab.
-          add(screenLabel, `resume:${media[t].key}`, { op: "resume", name: `${screenLabel}: resume ${media[t].name}`, target: t });
+          add(screenLabel, `resume:${media[t].key}`, { op: "resume", name: `${screenLabel}: resume ${media[t].name}`, target: mediaCue(t) });
           paused.delete(t);
         } else {
           add(screenLabel, `${action.type.slice(1)}:${media[t].key}`, action.type === "!stop"
-            ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: t }
-            : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: action.duration, opacity: 0, stop: true });
+            ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: mediaCue(t) }
+            : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: mediaCue(t), duration: action.duration, opacity: 0, stop: true });
           removeFromScreens(onScreen, t);
           paused.delete(t);
         }
@@ -165,16 +166,15 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         name: `${screenLabel}: ${media[idx].name}`,
         file: isCamera ? "" : fileName,
         stage,
-        media: idx,
         opacity: fade > 0 ? 0 : 1,
         loop: p.loop,
         layer: p.layer,
       });
       if (fade > 0) {
-        add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
+        add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: mediaCue(idx), duration: fade, opacity: 1, stop: false });
       }
       for (const t of replaced) {
-        add(screenLabel, `fade-out:${media[t].key}`, { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
+        add(screenLabel, `fade-out:${media[t].key}`, { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: mediaCue(t), duration: fade, opacity: 0, stop: true });
         removeFromScreens(onScreen, t);
         paused.delete(t);
       }
@@ -296,8 +296,8 @@ function toAppleScriptRecord(op) {
     zName: asString(op.name || ""),
     zFile: asString(op.file || ""),
     zStage: asString(op.stage || ""),
-    zMedia: (op.media ?? -1) + 1,      // AppleScript lists are 1-based; 0 = none
-    zTarget: (op.target ?? -1) + 1,
+    zParent: asString(op.parent ?? ""),
+    zTarget: asString(op.target ?? ""),
     zDur: op.duration ?? 0,
     zOpacity: op.opacity ?? 1,
     zStop: op.stop ? "true" : "false",
@@ -316,6 +316,20 @@ const QLAB_SCRIPT_TEMPLATE = `-- Generated by the ZEST cue list sheet ("ZEST > G
 
 property cueListName : %%CUE_LIST%%
 property mediaFolder : %%MEDIA_FOLDER%% -- relative to the folder containing the workspace, or an absolute path
+
+-- The keys (see generateQlab) and uniqueIDs of the cues created so far.
+property cueKeys : {}
+property cueIDs : {}
+
+-- The uniqueID of the cue with the given key.
+on idOfKey(k)
+  considering case
+    repeat with i from 1 to count of cueKeys
+      if item i of cueKeys is k then return item i of cueIDs
+    end repeat
+  end considering
+  error "no cue with the key " & k
+end idOfKey
 
 set ops to {}
 %%OPS%%
@@ -349,12 +363,9 @@ tell application id "com.figure53.QLab.5"
     set q name of theList to cueListName
     set current cue list to theList
 
-    set mediaIDs to {}
-    repeat %%MEDIA_COUNT%% times
-      set end of mediaIDs to ""
-    end repeat
+    set cueKeys to {}
+    set cueIDs to {}
     set problems to {}
-    set currentGroup to missing value
 
     repeat with o in ops
       set k to zKind of o
@@ -377,6 +388,8 @@ tell application id "com.figure53.QLab.5"
       set q number of c to (zNum of o)
       set q name of c to (zName of o)
       set notes of c to "zest:" & (zKey of o)
+      set end of cueKeys to (zKey of o)
+      set end of cueIDs to (uniqueID of c)
       if q number of c is not (zNum of o) then
         set end of problems to "cue number " & (zNum of o) & " is already used elsewhere in the workspace"
       end if
@@ -387,8 +400,6 @@ tell application id "com.figure53.QLab.5"
 
       if k is "group" then
         set pre wait of c to (zPreWait of o)
-        move cue id (uniqueID of c) of parent of c to end of theList
-        set currentGroup to c
       else
         if k is "video" or k is "camera" then
           if k is "video" then
@@ -408,9 +419,8 @@ tell application id "com.figure53.QLab.5"
           set opacity of c to (zOpacity of o)
           if zLoop of o then set infinite loop of c to true
           if (zLayer of o) is not 0 then set layer of c to (zLayer of o)
-          set item (zMedia of o) of mediaIDs to (uniqueID of c)
         else
-          set cue target of c to cue id (item (zTarget of o) of mediaIDs)
+          set cue target of c to cue id (my idOfKey(zTarget of o))
           if k is "fade" then
             set duration of c to (zDur of o)
             set do opacity of c to true
@@ -418,7 +428,13 @@ tell application id "com.figure53.QLab.5"
             set stop target when done of c to (zStop of o)
           end if
         end if
-        move cue id (uniqueID of c) of parent of c to end of currentGroup
+      end if
+
+      -- Into its group, or the top level of the cue list.
+      if (zParent of o) is "" then
+        move cue id (uniqueID of c) of parent of c to end of theList
+      else
+        move cue id (uniqueID of c) of parent of c to end of cue id (my idOfKey(zParent of o))
       end if
     end repeat
 
