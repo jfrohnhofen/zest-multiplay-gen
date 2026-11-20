@@ -16,6 +16,13 @@
  * Each screen (stage) has its own pair of columns, configured in QLAB_SCREENS:
  *   `<screen>\nfile`    file name or Drive smart chip, or `@camera` for a live camera cue
  *   `<screen>\nparams`  one parameter / action per line (see parseVideoParams)
+ *
+ * Every generated cue has a key in the first line of its Notes, `zest:<key>`, that names what it does for the sheet
+ * independently of its cue number (which depends on the order of the cues):
+ *   Q4                                    the group of the row with id Q4
+ *   Q4/Window/media                       the media that row Q4 starts on the Window screen
+ *   Q4/Window/fade-in                     its fade-in
+ *   Q4/Window/fade-out:Q2/Window          a fade-out (or stop, pause, resume) by row Q4 of the media of row Q2
  */
 function generateQlab(cues) {
   cues = cues ?? parseCuelist();
@@ -31,7 +38,7 @@ function generateQlab(cues) {
   const ops = [];                // flat list of cue-creation operations, consumed by the AppleScript runtime
   const state = {
     labels: new Map(),           // #label -> media index
-    media: [],                   // media index -> { name, screen }
+    media: [],                   // media index -> { name, screen, key }
     onScreen: {},                // screen track -> array of media indices currently visible
     paused: new Set(),           // media indices that are paused (and still visible)
   };
@@ -54,7 +61,7 @@ function generateQlab(cues) {
       ctx.at(row).err(e.message);
       continue;
     }
-    ops.push({ op: "group", number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
+    ops.push({ op: "group", key: row.cue, number, name: row.tracks.video?.description || row.description || "", delay: 0, continueMode: "" });
     children.forEach((child, i) => ops.push({ ...child, number: `${number}-${i + 1}` }));
   }
 
@@ -85,6 +92,14 @@ function generateQlab(cues) {
  */
 function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
   const children = [];
+  // Adds a child with its key (see generateQlab). A row can't do the same thing twice, so keys are unique.
+  const keys = new Set();
+  const add = (screenLabel, role, child) => {
+    const key = `${row.cue}/${screenLabel}/${role}`;
+    assert(!keys.has(key), `${where} / ${screenLabel}: ${role.split(":")[0]} of the same media twice`);
+    keys.add(key);
+    children.push({ ...child, key });
+  };
 
   for (const screen of Object.keys(QLAB_SCREENS).filter(s => hasVideo(row, s))) {
     const { stage, label: screenLabel } = QLAB_SCREENS[screen];
@@ -112,14 +127,14 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
       assert(targets.length > 0 || action.type === "!fade-out" || action.type === "!stop", `${where} / ${screenLabel}: ${action.type} but nothing to ${action.type.slice(1)} on screen`);
       for (const t of targets) {
         if (isPause) {
-          children.push({ op: "pause", name: `${screenLabel}: pause ${media[t].name}`, target: t });
+          add(screenLabel, `pause:${media[t].key}`, { op: "pause", name: `${screenLabel}: pause ${media[t].name}`, target: t });
           paused.add(t);
         } else if (isResume) {
           // A start cue resumes a paused cue in QLab.
-          children.push({ op: "resume", name: `${screenLabel}: resume ${media[t].name}`, target: t });
+          add(screenLabel, `resume:${media[t].key}`, { op: "resume", name: `${screenLabel}: resume ${media[t].name}`, target: t });
           paused.delete(t);
         } else {
-          children.push(action.type === "!stop"
+          add(screenLabel, `${action.type.slice(1)}:${media[t].key}`, action.type === "!stop"
             ? { op: "stop", name: `${screenLabel}: stop ${media[t].name}`, target: t }
             : { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: action.duration, opacity: 0, stop: true });
           removeFromScreens(onScreen, t);
@@ -132,7 +147,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
     if (fileName) {
       const isCamera = fileName.toLowerCase() === "@camera";
       const idx = media.length;
-      media.push({ name: isCamera ? "live camera" : fileName, screen });
+      media.push({ name: isCamera ? "live camera" : fileName, screen, key: `${row.cue}/${screenLabel}` });
       if (p.label != null) {
         assert(!labels.has(p.label), `${where}: duplicate label #${p.label}`);
         labels.set(p.label, idx);
@@ -140,7 +155,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
 
       const fade = p.fade ?? QLAB_DEFAULT_FADE;
       const replaced = p.keep ? [] : [...onScreen[screen]];
-      children.push({
+      add(screenLabel, "media", {
         op: isCamera ? "camera" : "video",
         name: `${screenLabel}: ${media[idx].name}`,
         file: isCamera ? "" : fileName,
@@ -151,10 +166,10 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         layer: p.layer,
       });
       if (fade > 0) {
-        children.push({ op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
+        add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: idx, duration: fade, opacity: 1, stop: false });
       }
       for (const t of replaced) {
-        children.push({ op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
+        add(screenLabel, `fade-out:${media[t].key}`, { op: "fade", name: `${screenLabel}: fade out ${media[t].name}`, target: t, duration: fade, opacity: 0, stop: true });
         removeFromScreens(onScreen, t);
         paused.delete(t);
       }
@@ -271,6 +286,7 @@ function toAppleScriptRecord(op) {
   // Keys are prefixed with "z" so they can't clash with terms from QLab's AppleScript dictionary.
   const v = {
     zKind: asString(op.op),
+    zKey: asString(op.key),
     zNum: asString(op.number),
     zName: asString(op.name || ""),
     zFile: asString(op.file || ""),
@@ -356,6 +372,7 @@ tell application id "com.figure53.QLab.5"
       set c to last item of (selected as list)
       set q number of c to (zNum of o)
       set q name of c to (zName of o)
+      set notes of c to "zest:" & (zKey of o)
       if q number of c is not (zNum of o) then
         set end of problems to "cue number " & (zNum of o) & " is already used elsewhere in the workspace"
       end if

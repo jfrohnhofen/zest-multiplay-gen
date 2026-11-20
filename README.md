@@ -144,6 +144,9 @@ Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, co
 which MultiPlay starts via OSC `/cue/<X>/start` (after the row's pre-wait, see [Cue Triggers](#cue-triggers)). Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
 and fade-and-stop cues for whatever it replaces on that screen.
 
+The first line of each generated cue's Notes is a key like `zest:Q12/Window/media`. It says what the cue does for
+the sheet, independently of its cue number. Don't edit that line in QLab.
+
 ### File column
 
 A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or `@camera` for a live camera cue.
