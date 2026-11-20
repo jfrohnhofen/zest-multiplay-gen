@@ -5,8 +5,13 @@
 const MULTIPLAY_ADVANCE = {
   MANUAL: 1,  // wait for the operator's GO
   WITH: 2,    // start the next cue together with this one (after this cue's pre-wait)
-  ON_END: 3,  // start the next cue when this one ends (follow-on-end)
+  ON_END: 4,  // start the next cue when this one ends (follow-on-end)
 };
+
+// Colours (RRGGBB) of the cues in MultiPlay's cue list: the cue the operator starts with GO (the first line of a `go`
+// row, the head of a block) stands out from all others, which start by themselves. R and B are equal so that the colours look the same in either byte order.
+const MULTIPLAY_GO_APPEARANCE = { $BGColour: "006000", $FontColour: "FFFFFF" };
+const MULTIPLAY_AUTO_APPEARANCE = { $BGColour: "202020", $FontColour: "FFFFFF" };
 
 /**
  * Generates a MultiPlay production XML file (`<SHOW_NAME>.mpp`) containing all audio, lighting, and video cues.
@@ -98,6 +103,7 @@ function generateMultiplay(cues) {
   const multiplayCues = list.map(line => {
     const cue = line.row;
     const xml = { ...line.xml };
+    const isGo = cue.trigger.kind === "go";
     if (xml.Control && typeof xml.Control.$Target === "object") {
       xml.Control = { ...xml.Control, $Target: xml.Control.$Target.uid };
     }
@@ -108,11 +114,11 @@ function generateMultiplay(cues) {
       UID: line.uid,
       // The first line of a row is the primary cue that displays a cue number, page number, description, etc. The other
       // lines are separate cues in MultiPlay that start together with it.
-      Q: line.isFirst ? `${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
+      Q: line.isFirst ? `${isGo ? "" : "[AUTO] "}${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
       ScriptRef: line.isFirst ? cue.description : "",
       Description: line.abbr + (line.descr ? ` - ${line.descr}` : ""),
       Advance: { $Action: line.advance, $Target: 0 },
-      Appearance: { $BGColour: "202020", $FontColour: "FFFFFF" },
+      Appearance: isGo && line.isFirst ? MULTIPLAY_GO_APPEARANCE : MULTIPLAY_AUTO_APPEARANCE,
     }};
   });
 

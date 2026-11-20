@@ -125,6 +125,10 @@ Validation (errors with row numbers; no output is written):
 MultiPlay pre-waits are stored as the difference to the previous cue of the chain (hence non-decreasing offsets).
 Placeholder cues (`MULTIPLAY_OUTPUT_*_PLACEHOLDER_CUES`) are only added to `go` rows.
 
+Cue ids are upper-cased (`q12` becomes `Q12` in MultiPlay, QLab and the OSC addresses). In MultiPlay's cue list only the
+head of a block (the `go` cue) is green; all other cues are grey, and `continue` / `follow` cues have `[AUTO]` in front of the
+cue number.
+
 ---
 
 ## QLab Video Cues

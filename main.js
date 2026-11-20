@@ -101,7 +101,8 @@ function parseCuelist() {
     // +2: skip the header row, and sheet rows are 1-based.
     cue.row = rowIndex + 2;
     if (typeof cue.cue === "string") {
-      cue.cue = cue.cue.trim();
+      // Upper case everywhere (MultiPlay cue number, OSC address, QLab cue number), so that q1 and Q1 are the same id.
+      cue.cue = cue.cue.trim().toUpperCase();
     }
 
     // The trigger says how the row starts (see schedule.js). Skipped rows are ignored entirely, and so are rows
