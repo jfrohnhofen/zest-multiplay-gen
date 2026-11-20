@@ -149,9 +149,6 @@ function hasSound(cue) {
   return cue.tracks.sound?.file != null || cue.tracks.sound?.params != null;
 }
 
-// Still images play until stopped in QLab, so a group showing one never ends.
-const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|bmp|tiff?|heic|psd|webp)$/i;
-
 /** True if the row has a file or params in the given video screen column (any screen if omitted). */
 function hasVideo(row, screen) {
   const screens = screen == null ? Object.keys(QLAB_SCREENS) : [screen];

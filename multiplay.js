@@ -22,7 +22,6 @@ const MULTIPLAY_ADVANCE = {
  *   the offsets of consecutive rows (offsets of a block must not decrease).
  * - `follow #sound +N`: its lines are chained right after the labeled sound, whose advance is follow-on-end, with a
  *   pre-wait of N s. A cue starts one successor only, so the labeled sound has to be the last cue of its chain.
- * - `follow #video`: nothing, QLab starts the row by itself (see generateQlab).
  */
 function generateMultiplay(cues) {
   cues = cues ?? parseCuelist();
@@ -41,9 +40,6 @@ function generateMultiplay(cues) {
   // 1. The lines of each row that MultiPlay schedules.
   const rowLines = new Map();
   for (const cue of cues) {
-    if (cue.scheduler !== "multiplay") {
-      continue;
-    }
     ctx.at(cue);
     const lines = buildMultiplayLines(cue, soundLabels, ctx);
     ctx.check(lines.length > 0, "cue has no action");
@@ -70,7 +66,7 @@ function generateMultiplay(cues) {
     }
 
     for (const [i, row] of rows.entries()) {
-      const followers = row.followers.filter(f => f.anchor.kind === "sound" && rowLines.has(f));
+      const followers = row.followers.filter(f => rowLines.has(f));
       if (followers.length === 0) {
         continue;
       }
@@ -202,7 +198,7 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
       if (hasLabel && !duplicateLabel) {
         soundLabels.set(label, line);
       }
-      if (cue.followers.some(f => f.anchor.kind === "sound")) {
+      if (cue.followers.length > 0) {
         anchorLine = line;
       }
     }

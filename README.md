@@ -8,7 +8,7 @@ An automated Google Apps Script project for theatre productions that parses mast
 
 - **Google Sheets Cue List Parser**: Reads structured cue data directly from the active Google Sheet, including multi-track headers (LX, SX, VX) and Google Drive smart link chips.
 - **MultiPlay 3.0 XML File Generator**: Outputs `.mpp` production files ready to load directly into MultiPlay.
-- **Cue Triggers**: A `Trigger` column says how each row starts: operator `go`, `continue +Ns` after the block's GO, or `follow #label +Ns` after a labeled sound or video ends (see [Cue Triggers](#cue-triggers)).
+- **Cue Triggers**: A `Trigger` column says how each row starts: operator `go`, `continue +Ns` after the block's GO, or `follow #label +Ns` after a labeled sound ends (see [Cue Triggers](#cue-triggers)).
 - **Sound Cueing & Parameter DSL**:
   - File playback with local path resolution.
   - Parameter controls: `$loop`, `$fade-in-dur`, `$fade-out-dur`, `$volume`, `$start-pos`, `$stop-pos`.
@@ -19,7 +19,6 @@ An automated Google Apps Script project for theatre productions that parses mast
 - **QLab Video Cue List Generator**: Outputs an AppleScript that rebuilds the QLab video cue list from the sheet, with cue numbers matching the MultiPlay triggers.
   - Multiple screens (QLab stages), each with its own file and params column.
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
-  - Rows that follow the end of a video start in QLab by themselves.
   - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`.
   - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
 - **Asset Bundler**: Automatically creates Google Drive shortcuts for all referenced media files inside track-specific subfolders (`sound`, `video`, etc.) in the designated output folder. Files from all video screens are collected in one `video` folder.
@@ -33,7 +32,7 @@ An automated Google Apps Script project for theatre productions that parses mast
 .
 ├── appsscript.json   # Google Apps Script manifest (V8 runtime, Sheets v4 API)
 ├── main.js           # Configuration constants, spreadsheet parser, and UI menu bindings
-├── schedule.js       # Cue triggers: trigger parser, blocks / anchors / scheduler resolution and validation
+├── schedule.js       # Cue triggers: trigger parser, blocks / anchors resolution and validation
 ├── multiplay.js      # MultiPlay XML template builder & parameter DSL parser
 ├── qlab.js           # QLab AppleScript generator & video parameter DSL parser
 ├── assets.js         # Google Drive media asset bundler
@@ -100,31 +99,26 @@ trigger := skip | go | continue [+<N>s] | follow #<label> [+<N>s]
 | `skip` | Ignored (deliberately disabled). |
 | `go` | The operator triggers it in MultiPlay. Has no delay. |
 | `continue [+Ns]` | Starts N s after the GO of the block's head (0 if omitted). |
-| `follow #label [+Ns]` | Starts N s after the labeled sound or video of an earlier row ends. |
+| `follow #label [+Ns]` | Starts N s after the labeled sound of an earlier row ends. |
 
 A **block** is a `go` row (the head) plus the non-`go` rows below it, up to the next `go`. `continue` counts from the
 head, never from the previous row, so inserting a row never shifts other timings. The first active row must be `go`.
 
-Whoever owns the anchor's media schedules the follower: sound delays live in MultiPlay, video delays in QLab.
+All delays live in MultiPlay (QLab groups are started via OSC); only sounds can be followed. For a video use `continue +Ns`.
 
 | Trigger | MultiPlay | QLab | grandMA |
 |---------|-----------|------|---------|
 | `go` | Manual cue with SX / LX / VX lines chained | Group `<id>`, started by OSC | `goto cue <id>` from MultiPlay |
 | `continue +N` | SX / LX / VX lines chained to the head, with a pre-wait | Group started via OSC | `goto cue <id>` from MultiPlay |
 | `follow` a sound | Follow-on-end after the sound, plus a pre-wait of N | Group started via OSC | `goto cue <id>` from MultiPlay |
-| `follow` a video | Nothing | Group right after the labeled one, which has auto-follow, with a pre-wait of N | Not allowed |
 
 Validation (errors with row numbers; no output is written):
 
-- `follow #label`: the label must be defined in an earlier row of the same block. Its media has to end, so images,
-  `$loop` videos, looping sounds and `@camera` are errors: use `continue +Ns` there.
-- A follower of a video is video-only (no sound, no lights).
-- No row between the labeled media and the follower may touch the follower's screens, or stop, pause or fade the
-  labeled media (for a video: or touch its screen).
+- `follow #label`: the label must be defined on a sound in an earlier row of the same block. The sound has to end, so
+  looping sounds are errors, and so is a label on a video: use `continue +Ns` there.
+- No row between the sound and the follower may stop, pause or fade the sound.
 - `continue` offsets within a block must not decrease.
-- Several followers of one label are allowed. In QLab they go in an extra group `<id>-f`, so they can't have followers
-  of their own. A follow of a video waits for the end of the whole QLab group of its row, so that row can't show an image,
-  loop or camera on another screen.
+- Several followers of one label are allowed.
 - A MultiPlay cue starts one successor, so a sound that has followers must be the last cue of its chain: no `continue`
   row may come after the row with that sound.
 
@@ -143,7 +137,7 @@ generates an AppleScript because a `.qlab5` workspace is an undocumented binary 
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
-which MultiPlay starts via OSC `/cue/<X>/start` (rows that follow the end of a video start by themselves, see [Cue Triggers](#cue-triggers)). Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
+which MultiPlay starts via OSC `/cue/<X>/start` (after the row's pre-wait, see [Cue Triggers](#cue-triggers)). Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
 and fade-and-stop cues for whatever it replaces on that screen.
 
 ### File column
