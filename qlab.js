@@ -405,13 +405,14 @@ property previewFile : "" -- the file with the preview of the plan, which also l
 
 property problems : {}
 
--- The index of x in the list, or 0.
+-- The index of x in the list, or 0. Ignores case, like cue ids (q12 and Q12 are the same row), so keys written before
+-- cue ids were upper case still match.
 on indexOf(lst, x)
-  considering case
+  ignoring case
     repeat with i from 1 to count of lst
       if item i of lst is x then return i
     end repeat
-  end considering
+  end ignoring
   return 0
 end indexOf
 
