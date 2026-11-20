@@ -145,7 +145,8 @@ which MultiPlay starts via OSC `/cue/<X>/start` (after the row's pre-wait, see [
 and fade-and-stop cues for whatever it replaces on that screen.
 
 The first line of each generated cue's Notes is a key like `zest:Q12/Window/media`. It says what the cue does for
-the sheet, independently of its cue number. Don't edit that line in QLab.
+the sheet, independently of its cue number. The second line remembers the values the sheet set, like
+`name=Window: a.mp4|file=a.mp4|opacity=0|…` (times and opacities in thousandths). Don't edit these two lines in QLab.
 
 ### File column
 
