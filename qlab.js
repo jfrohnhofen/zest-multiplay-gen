@@ -105,6 +105,7 @@ function qlabScript(ops, rebuild) {
     MEDIA_FOLDER: asString(QLAB_MEDIA_FOLDER),
     REBUILD: String(rebuild),
     STEPS: asTextLines("stepsJSON", rebuild ? JSON.stringify(qlabPlan(sheet, { listID: "", mediaPath: "", files: null, cues: [] }, {}).steps) : ""),
+    OSC_PERL: asString(QLAB_OSC_PERL),
     PAGE: asTextLines("pageJSON", rebuild ? "" : JSON.stringify([qlabPage(sheet)])),
   };
   // In one pass, so that a placeholder inside a filled in text (e.g. a cue name) stays as it is.
@@ -237,6 +238,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         opacity: fade > 0 ? 0 : 1,
         loop: p.loop,
         layer: p.layer,
+        rotation: p.rotate,
       });
       if (fade > 0) {
         add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: mediaCue(idx), duration: fade, opacity: 1, stop: false });
@@ -270,6 +272,7 @@ function removeFromScreens(onScreen, idx) {
  * - `$loop`: loop the video forever.
  * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
  * - `$layer <n>`: QLab video layer (higher is on top).
+ * - `$rotate <degrees>`: rotate the media around the Z axis, in whole degrees (e.g. 90 or -90).
  *
  * Control actions target media that is already running, without needing a file:
  * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
@@ -278,7 +281,7 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, loop: false, keep: false, layer: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, actions: [], hasMediaParams: false };
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -316,6 +319,11 @@ function parseVideoParams(input, where) {
       case "$layer":
         assert(args.length === 1, `${where}: usage $layer <n>`);
         result.layer = num(args[0], name);
+        result.hasMediaParams = true;
+        break;
+      case "$rotate":
+        assert(args.length === 1 && !isNaN(Number(args[0])), `${where}: usage $rotate <degrees>`);
+        result.rotate = Number(args[0]);
         result.hasMediaParams = true;
         break;
       case "!fade-out":
@@ -367,6 +375,11 @@ function sheetValues(op) {
     }
     if (op.layer != null) {
       values.push(["layer", String(Math.round(op.layer))]);
+    }
+    if (op.rotation != null) {
+      // In whole degrees from -179 to 180, as the script reads it back (see QLAB_OSC_PERL).
+      const degrees = ((Math.round(op.rotation) % 360) + 360) % 360;
+      values.push(["rotation", String(degrees > 180 ? degrees - 360 : degrees)]);
     }
   }
   if (op.op === "fade") {
@@ -792,6 +805,9 @@ function qlabShownValue(name, value) {
   if (name === "opacity") {
     return String(Number(value) / 1000);
   }
+  if (name === "rotation") {
+    return value === "3d" ? "a 3D rotation" : `${value}°`;
+  }
   return `"${value}"`;
 }
 
@@ -1028,6 +1044,49 @@ render();
 </html>
 `;
 
+/**
+ * A Perl script (Perl comes with macOS) that sends OSC messages to QLab on the same Mac, for what AppleScript can't do:
+ * rotating video cues. It connects over TCP (SLIP framed), so the replies come back on the same connection, and logs in
+ * with /connect first if it is given a passcode (Workspace Settings > Network > OSC Access).
+ *   perl -e <script> <passcode or ""> <address> [f:<number> | s:<text>]... [; <address> ...]...
+ * It prints a line for each reply to /connect ("connect <status> <data>") and to /cue_id/<id>/quaternion ("<id> <status>
+ * <rotation>", tab separated). The rotation is in whole degrees around the Z axis, from -179 to 180, or "3d" if the cue
+ * is rotated around another axis too. QLab doesn't reply to the messages that change something.
+ * It has no comments and each statement ends with ";", because the script gets it on one line (see asString).
+ */
+const QLAB_OSC_PERL = String.raw`use strict; use IO::Socket::INET; use JSON::PP;
+my ($passcode, @words) = @ARGV;
+sub pad { my $s = shift() . "\0"; $s .= "\0" while length($s) % 4; return $s; }
+sub slip { my $s = shift; $s =~ s/\xDB/\xDB\xDD/g; $s =~ s/\xC0/\xDB\xDC/g; return "\xC0" . $s . "\xC0"; }
+sub message { my ($address, @args) = @_; my ($types, $data) = (',', ''); for (@args) { my ($t, $v) = split /:/, $_, 2; $types .= $t; $data .= $t eq 'f' ? pack('f>', $v) : pad($v); } return slip(pad($address) . pad($types) . $data); }
+my @messages = ([]);
+for my $w (@words) { if ($w eq ';') { push @messages, []; } else { push @{$messages[-1]}, $w; } }
+@messages = grep { @$_ } @messages;
+my $expected = ($passcode ne '' ? 1 : 0) + scalar(grep { @$_ == 1 && $_->[0] =~ m{/quaternion$} } @messages);
+my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => 53000, Proto => 'tcp', Timeout => 2) or die "can't connect to QLab's OSC port (TCP 53000): $!\n";
+binmode $sock;
+my $out = $passcode ne '' ? message('/connect', "s:$passcode") : '';
+$out .= message(@$_) for @messages;
+print $sock $out; $sock->flush;
+my ($buffer, $chunk) = ('', '');
+my $in = ''; vec($in, fileno($sock), 1) = 1;
+while ($expected > 0) { my $frames = () = $buffer =~ /\xC0[^\xC0]+\xC0/g; last if $frames >= $expected; last unless select(my $ready = $in, undef, undef, 2.0); last unless sysread($sock, $chunk, 65535); $buffer .= $chunk; }
+for my $frame (grep { length } split /\xC0/, $buffer) {
+  $frame =~ s/\xDB\xDC/\xC0/g; $frame =~ s/\xDB\xDD/\xDB/g;
+  my @parts = grep { length } split /\0+/, $frame;
+  my $reply = eval { decode_json($parts[-1]) } or next;
+  my ($address, $status) = ($reply->{address} // '', $reply->{status} // '');
+  if ($address =~ m{/connect$}) { print join("\t", 'connect', $status, $reply->{data} // ''), "\n"; next; }
+  next unless $address =~ m{/cue_id/([^/]+)/quaternion$};
+  my ($id, $degrees, $q) = ($1, '', $reply->{data});
+  if ($status eq 'ok' && ref $q eq 'ARRAY' && @$q == 4) {
+    my ($x, $y, $z, $w) = @$q;
+    if (abs($x) < 0.001 && abs($y) < 0.001) { $degrees = 2 * atan2($z, $w) * 45 / atan2(1, 1); $degrees -= 360 while $degrees > 180.5; $degrees += 360 while $degrees <= -179.5; $degrees = sprintf('%.0f', $degrees) + 0; } else { $degrees = '3d'; }
+  }
+  print join("\t", $id, $status, $degrees), "\n";
+}
+`;
+
 const QLAB_SCRIPT_TEMPLATE = `-- Generated by the ZEST cue list sheet ("ZEST > Generate QLab script"). Do not edit by hand.
 -- Show: %%SHOW%%
 -- Run this on the QLab Mac with the show workspace open (open in Script Editor, press Run).
@@ -1049,6 +1108,11 @@ property createdRefs : {} -- the cues created by this run, as "new:<key>" (see q
 property createdIDs : {} -- and their uniqueIDs
 property failedValues : {} -- the values that couldn't be set, as "<cue>#<value name>"
 property problems : {}
+
+-- OSC, for rotating cues (see QLAB_OSC_PERL in qlab.js).
+property oscPerl : %%OSC_PERL%%
+property oscPasscode : "" -- asked for only if QLab refuses without one
+property oscAsked : false
 
 -- JSON, with macOS's built-in Foundation.
 on toJSON(x)
@@ -1164,8 +1228,93 @@ on readValue(c, n)
   return ""
 end readValue
 
+-- Sends OSC messages to QLab (see QLAB_OSC_PERL in qlab.js): words are the addresses and arguments, with ";" between
+-- the messages. Returns the lines of the replies.
+on oscRun(oscWords)
+  set cmd to "perl -e " & quoted form of oscPerl & " " & quoted form of oscPasscode
+  repeat with w in oscWords
+    set cmd to cmd & " " & quoted form of (contents of w)
+  end repeat
+  return paragraphs of (do shell script cmd)
+end oscRun
+
+-- The rotation of a cue in the replies of oscRun ("" if there is none, e.g. access denied).
+on rotationIn(replyLines, cueID)
+  set AppleScript's text item delimiters to tab
+  repeat with x in replyLines
+    set fields to text items of (contents of x)
+    if (count of fields) is 3 and item 1 of fields is cueID and item 2 of fields is "ok" then
+      set AppleScript's text item delimiters to ""
+      return item 3 of fields
+    end if
+  end repeat
+  set AppleScript's text item delimiters to ""
+  return ""
+end rotationIn
+
+-- Asks for the OSC passcode, once per run, when QLab doesn't let the script change cues without one.
+on askPasscode()
+  set oscAsked to true
+  activate
+  set dialogResult to display dialog "QLab doesn't let this script rotate cues over OSC without a passcode." & return & return & "Enter the passcode with Edit permission from Workspace Settings > Network > OSC Access (it isn't saved), or click Skip." default answer "" buttons {"Skip", "OK"} default button 2 with hidden answer
+  if button returned of dialogResult is "OK" then set oscPasscode to text returned of dialogResult
+end askPasscode
+
+-- Adds the rotation of each video and camera cue that the sheet rotated before (see sheetValues in qlab.js) to its
+-- values in scanned, read with OSC.
+on readRotations()
+  set oscWords to {}
+  repeat with i from 1 to count of scanned
+    set entry to item i of scanned
+    if (item 6 of entry) contains "rotation=" and (item 2 of entry) is in {"Video", "Camera"} then
+      set end of oscWords to "/cue_id/" & (item 1 of entry) & "/quaternion"
+      set end of oscWords to ";"
+    end if
+  end repeat
+  if oscWords is {} then return
+  repeat 2 times
+    set replyLines to my oscRun(oscWords)
+    set allRead to true
+    repeat with i from 1 to count of scanned
+      if (item 6 of item i of scanned) contains "rotation=" and (item 2 of item i of scanned) is in {"Video", "Camera"} then
+        if my rotationIn(replyLines, item 1 of item i of scanned) is "" then set allRead to false
+      end if
+    end repeat
+    if allRead or oscAsked then exit repeat
+    my askPasscode()
+  end repeat
+  repeat with i from 1 to count of scanned
+    set r to my rotationIn(replyLines, item 1 of item i of scanned)
+    if r is not "" then set end of item 8 of item i of scanned to {"rotation", r}
+  end repeat
+end readRotations
+
+-- Rotates a video or camera cue around the Z axis: Geometry mode "Custom" (fill stage off) with AppleScript, the
+-- rotation with OSC (AppleScript can't), and reads it back to check. Returns a problem, or "" if it worked.
+on setRotation(c, v)
+  tell application id "com.figure53.QLab.5"
+    set cueID to uniqueID of c
+    try
+      set fill stage of c to false
+    end try
+  end tell
+  set oscWords to {"/cue_id/" & cueID & "/resetRotation", ";", "/cue_id/" & cueID & "/rotate/z", "f:" & v, ";", "/cue_id/" & cueID & "/quaternion"}
+  repeat 2 times
+    try
+      set r to my rotationIn(my oscRun(oscWords), cueID)
+    on error e
+      return "can't rotate it with OSC (" & e & ")"
+    end try
+    if r is v then return ""
+    if oscAsked then exit repeat
+    my askPasscode()
+  end repeat
+  return "QLab didn't rotate it to " & v & " degrees (is OSC allowed, with Edit permission? see Workspace Settings > Network > OSC Access)"
+end setRotation
+
 -- Sets one value the sheet controls. Returns a problem, or "" if it worked.
 on setValue(c, n, v)
+  if n is "rotation" then return my setRotation(c, v)
   if n is "file" then
     set f to mediaPath & "/" & v
     try
@@ -1420,6 +1569,8 @@ set createdRefs to {}
 set createdIDs to {}
 set failedValues to {}
 set problems to {}
+set oscPasscode to ""
+set oscAsked to false
 
 tell application id "com.figure53.QLab.5"
   activate
@@ -1475,6 +1626,12 @@ end if
 -- Update: read the cue list and the media folder, show the plan in Safari, and carry it out once Apply is clicked
 -- there. The page is saved next to the workspace (or on the Desktop), and saved again with the result, as a log.
 my scanCues(theList)
+try
+  my readRotations()
+on error e
+  activate
+  display dialog "The script can't read the rotations of the cues with OSC (" & e & ")." & return & return & "If you continue, the sheet's rotations are set only where the sheet changed them." buttons {"Cancel", "Continue"} default button 2 cancel button 1 with icon caution
+end try
 set mediaFiles to {}
 set filesKnown to false
 try
