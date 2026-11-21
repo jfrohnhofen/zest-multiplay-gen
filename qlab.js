@@ -89,24 +89,75 @@ function generateQlab(cues) {
 /**
  * The AppleScript for the ops: `rebuild` deletes the cue list and builds it again, otherwise the script updates the
  * existing cue list in place (see QLAB_SCRIPT_TEMPLATE).
+ *
+ * Both carry out steps planned by qlabPlan. The rebuild script has them built in (planned for an empty cue list). The
+ * update script has the preview page built in instead (see qlabPage), which plans the steps from the cue list as it is
+ * when the script runs, and hands them back to the script once they are approved.
  */
 function qlabScript(ops, rebuild) {
+  const sheet = qlabSheetCues(ops);
   const fill = {
-    "%%SHOW%%": asString(SHOW_NAME),
-    "%%PURPOSE%%": rebuild
+    SHOW: asString(SHOW_NAME),
+    PURPOSE: rebuild
       ? `It deletes the cue list ${asString(QLAB_CUE_LIST_NAME)} and rebuilds it from the sheet, so it is safe to re-run.`
-      : `It updates the cue list ${asString(QLAB_CUE_LIST_NAME)} to match the sheet. It sets the values the sheet changed since the last run, and keeps the ones changed in QLab and everything the sheet doesn't control (e.g. geometry, effects, cues added by hand).`,
-    "%%CUE_LIST%%": asString(QLAB_CUE_LIST_NAME),
-    "%%MEDIA_FOLDER%%": asString(QLAB_MEDIA_FOLDER),
-    "%%REBUILD%%": String(rebuild),
-    "%%OPS%%": chunk(ops.map(toAppleScriptRecord), 50)
-      .map(part => "set ops to ops & {" + part.join(", ¬\n    ") + "}").join("\n"),
+      : `It updates the cue list ${asString(QLAB_CUE_LIST_NAME)} to match the sheet. It sets the values the sheet changed since the last run, and keeps the ones changed in QLab and everything the sheet doesn't control (e.g. geometry, effects, cues added by hand). It shows the changes in Safari first, and makes them once Apply is clicked there.`,
+    CUE_LIST: asString(QLAB_CUE_LIST_NAME),
+    MEDIA_FOLDER: asString(QLAB_MEDIA_FOLDER),
+    REBUILD: String(rebuild),
+    STEPS: asTextLines("stepsJSON", rebuild ? JSON.stringify(qlabPlan(sheet, { listID: "", mediaPath: "", files: null, cues: [] }, {}).steps) : ""),
+    PAGE: asTextLines("pageJSON", rebuild ? "" : JSON.stringify([qlabPage(sheet)])),
   };
-  let content = QLAB_SCRIPT_TEMPLATE;
-  for (const [key, value] of Object.entries(fill)) {
-    content = content.split(key).join(value);
+  // In one pass, so that a placeholder inside a filled in text (e.g. a cue name) stays as it is.
+  return QLAB_SCRIPT_TEMPLATE.replace(/%%([A-Z_]+)%%/g, (placeholder, name) => fill[name] ?? placeholder);
+}
+
+/**
+ * The cues of the sheet, as qlabPlan takes them: the op's kind, QLab cue type, key, parent key ("" for the cue list),
+ * cue number, target key ("" if none), the files of a row (see generateQlab) and the values the sheet controls.
+ */
+function qlabSheetCues(ops) {
+  return ops.map(op => ({
+    key: op.key,
+    kind: op.op,
+    type: QLAB_CUE_TYPES[op.op],
+    parent: op.parent ?? "",
+    number: op.number,
+    target: op.target ?? "",
+    files: String(op.files ?? "").replace(/[|\r\n]+/g, " "),
+    values: sheetValues(op),
+  }));
+}
+
+/**
+ * The preview page of the update script (see QLAB_PAGE), with the cues of the sheet and the planning code built in.
+ * The script fills in the cue list as it is when it runs.
+ */
+function qlabPage(sheet) {
+  const code = [qlabPlan, qlabSummaryLines, qlabDecide, qlabRenamedKey, qlabLongestRisingRun, qlabShownValue, qlabPreviewHtml, qlabEscape]
+    .map(String).join("\n\n");
+  assert(!/<\/script/i.test(code), "the planning code can't contain </script>");
+  const fill = {
+    SHOW: qlabEscape(SHOW_NAME),
+    SHEET: JSON.stringify(sheet).replace(/</g, "\\u003c"), // so that no text in it can end the <script>
+    CODE: code,
+  };
+  return QLAB_PAGE.replace(/%%(SHOW|SHEET|CODE)%%/g, (placeholder, name) => fill[name]);
+}
+
+/**
+ * AppleScript lines that set the variable `name` to the text, in pieces (AppleScript chokes on very long lines).
+ */
+function asTextLines(name, text) {
+  const lines = [`set ${name} to ""`];
+  for (let i = 0; i < text.length;) {
+    let end = Math.min(i + 2000, text.length);
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) {
+      end--; // don't split a character in two
+    }
+    lines.push(`set ${name} to ${name} & ${asString(text.slice(i, end))}`);
+    i = end;
   }
-  return content;
+  return lines.join("\n");
 }
 
 /**
@@ -289,15 +340,6 @@ function parseVideoParams(input, where) {
   return result;
 }
 
-/** Splits an array into chunks (AppleScript chokes on very long list literals). */
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) {
-    out.push(arr.slice(i, i + size));
-  }
-  return out;
-}
-
 /** Quotes a JS string as an AppleScript string literal. */
 function asString(s) {
   return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ") + '"';
@@ -336,92 +378,734 @@ function sheetValues(op) {
 // The QLab cue type of each op.
 const QLAB_CUE_TYPES = { group: "Group", video: "Video", camera: "Camera", fade: "Fade", stop: "Stop", pause: "Pause", resume: "Start" };
 
-/** Converts an op into an AppleScript record. */
-function toAppleScriptRecord(op) {
-  // Keys are prefixed with "z" so they can't clash with terms from QLab's AppleScript dictionary.
-  const v = {
-    zKind: asString(op.op),
-    zType: asString(QLAB_CUE_TYPES[op.op]),
-    zKey: asString(op.key),
-    zParent: asString(op.parent ?? ""),
-    zNum: asString(op.number),
-    zTarget: asString(op.target ?? ""),
-    zFiles: asString(String(op.files ?? "").replace(/[|\r\n]+/g, " ")),
-    zValues: "{" + sheetValues(op).map(([name, value]) => `{${asString(name)}, ${asString(value)}}`).join(", ") + "}",
+/**
+ * Works out how to bring the QLab cue list in line with the sheet, without changing anything yet.
+ *
+ * - sheet: the cues of the sheet (see qlabSheetCues).
+ * - qlab: the cue list as it is (see scanCues in QLAB_SCRIPT_TEMPLATE): { listID, mediaPath, files (the names in the
+ *   media folder, or null if unknown), cues: [{ id (uniqueID), type, parent (uniqueID), number, name, notes, target
+ *   (uniqueID or ""), values ([name, value] pairs, of a cue with a key) }] }. For a rebuild, it has no cues.
+ * - answers: { notRenamed: the renames answered "no", takeSheet: the conflicts answered "take the sheet's value" }
+ *   (by id).
+ *
+ * Every cue the sheet had before has the key of what it does for the sheet in the first line of its Notes, and the
+ * sheet's values of last time in the second line (see sheetValues). A cue of the sheet reuses the cue with its key,
+ * and only its values the sheet changed since last time are set (see qlabDecide). Cues the sheet doesn't have anymore
+ * are marked as removed. Cues without a key (added by hand) aren't changed.
+ *
+ * Returns:
+ * - renames: the rows that look renamed, { id, from, to, accepted }.
+ * - conflicts: the values both changed, { id, number, name, qlab, sheet, takeSheet }.
+ * - sections: the preview (see qlabPreviewHtml), a section for each row with changes, with a line for each change
+ *   and a shorter summary of them (see qlabSummaryLines).
+ * - unchanged: the number of rows without changes; changes: the number of changes; counts.
+ * - steps: what the script does to carry it out (see runSteps in QLAB_SCRIPT_TEMPLATE), lists of text:
+ *     clearNumber <cue>                        clear its number (so it isn't taken when set again)
+ *     create <cue> <type> <holder>             make a cue at the end of a group or the cue list
+ *     restore <cue> <name>                     unmark a removed cue: name, armed, no color
+ *     number <cue> <number>
+ *     target <cue> <target cue>
+ *     set <cue> <value name> <value> <number>  set a value (see setValue), the number is for problems
+ *     notes <cue> <key> <values> <extra>       write the Notes: the key, the values to remember ([name, value, value
+ *                                              if it couldn't be set (null: none)]) and the lines added in QLab
+ *     place <holder> <cues>                    put the cues in this order (see placeCues)
+ *     remove <cue> <new name or ""> <yes/no>   mark a cue as removed, and move it to the end of the cue list (yes)
+ *   A <cue> is a uniqueID, "new:<key>" for a cue created by an earlier step, or "list" for the cue list.
+ *
+ * This also runs in the preview page, so it can only use the functions qlabPage builds in.
+ */
+function qlabPlan(sheet, qlab, answers) {
+  const lower = s => String(s).toLowerCase();
+  const notRenamed = answers.notRenamed || [];
+  const takeSheet = answers.takeSheet || [];
+
+  // The cues in QLab, with their key and the sheet's values of last time from the Notes.
+  const cues = qlab.cues.map(c => {
+    const notes = String(c.notes ?? "").split(/\r\n|\r|\n/);
+    const remembered = new Map();
+    for (const pair of (notes[1] ?? "").split("|")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0 && !remembered.has(pair.slice(0, eq))) {
+        remembered.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+    }
+    return {
+      ...c,
+      number: String(c.number ?? ""),
+      name: String(c.name ?? ""),
+      key: notes[0].startsWith("zest:") ? notes[0].slice(5) : "",
+      values: new Map(c.values ?? []),
+      remembered,
+      extra: notes.length > 2 ? "\n" + notes.slice(2).join("\n") : "", // lines added in QLab
+    };
+  });
+
+  // Keys are matched ignoring case, like cue ids (q12 and Q12 are the same row).
+  const sheetIndex = new Map(sheet.map((o, d) => [lower(o.key), d]));
+  const indexOfKey = k => sheetIndex.get(lower(k)) ?? -1;
+  const originalKeys = new Set(cues.filter(c => c.key).map(c => lower(c.key)));
+
+  // A renamed row (new cue id) looks like a removed row plus a new one. A row group the sheet doesn't have anymore and
+  // a new one that show the same files on the same screens are a rename, unless another removed or new row shows the
+  // same files too, or it is answered otherwise.
+  const renames = [];
+  for (const o of sheet) {
+    if (!o.files || originalKeys.has(lower(o.key))) {
+      continue;
+    }
+    const candidates = cues.filter(c => c.key && !c.key.includes("/") && indexOfKey(c.key) < 0 && c.remembered.get("files") === o.files);
+    const twins = sheet.filter(o2 => o2.files === o.files && !originalKeys.has(lower(o2.key)));
+    if (candidates.length === 1 && twins.length === 1) {
+      const id = `${candidates[0].key}>${o.key}`;
+      renames.push({ id, from: candidates[0].key, to: o.key, accepted: !notRenamed.includes(id) });
+    }
+  }
+  const oldKeys = cues.map(c => renames.filter(r => r.accepted).reduce((k, r) => qlabRenamedKey(k, r.from, r.to), c.key));
+
+  // Which existing cue each cue of the sheet reuses (-1: none). A cue is reused only if it still has the same type (e.g.
+  // a video that becomes a camera is replaced). The others with a key are removed, or copies made in QLab.
+  const reused = sheet.map(() => -1);
+  const removed = [];
+  const duplicates = [];
+  oldKeys.forEach((k, i) => {
+    if (!k) {
+      return;
+    }
+    const d = indexOfKey(k);
+    if (d < 0 || cues[i].type !== sheet[d].type) {
+      removed.push(i);
+    } else if (reused[d] >= 0) {
+      duplicates.push(i);
+    } else {
+      reused[d] = i;
+    }
+  });
+  const refOf = d => reused[d] >= 0 ? cues[reused[d]].id : `new:${sheet[d].key}`;
+  const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
+
+  // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
+  const conflicts = [];
+  const verdicts = sheet.map((o, d) => o.values.map(([name, value]) => {
+    const c = cues[reused[d]];
+    if (!c) {
+      return { verdict: "set", qlab: null, last: null };
+    }
+    const qlabValue = c.values.get(name) ?? "";
+    const last = c.remembered.get(name) ?? null;
+    // A video whose file is gone (e.g. after the media folder was replaced by a new export) has no file in QLab. That
+    // isn't a change made in QLab, so the sheet's file is set (again), without a question.
+    if (name === "file" && qlabValue === "") {
+      return { verdict: "set", qlab: qlabValue, last, missing: true };
+    }
+    let verdict = qlabDecide(qlabValue, value, last);
+    if (verdict === "conflict") {
+      const id = `${o.key}#${name}`;
+      conflicts.push({ id, number: o.number, name, qlab: qlabValue, sheet: value, takeSheet: takeSheet.includes(id) });
+      verdict = takeSheet.includes(id) ? "set" : "keep";
+    }
+    return { verdict, qlab: qlabValue, last };
+  }));
+
+  // The moves. In each group (and the cue list), the existing cues of the sheet that form the longest run in sheet
+  // order stay; the others move, and so do the ones that come from another group.
+  const moved = new Set();
+  const byParent = new Map(); // parent key -> the uniqueIDs of the existing cues that go in it, in sheet order
+  sheet.forEach((o, d) => {
+    if (reused[d] >= 0) {
+      byParent.set(o.parent, [...(byParent.get(o.parent) ?? []), cues[reused[d]].id]);
+    }
+  });
+  for (const [parentKey, wanted] of byParent) {
+    const g = parentKey === "" ? -1 : reused[indexOfKey(parentKey)];
+    const holder = parentKey === "" ? qlab.listID : g >= 0 ? cues[g].id : "";
+    const positions = cues.filter(c => c.parent === holder && wanted.includes(c.id)).map(c => wanted.indexOf(c.id));
+    const staying = qlabLongestRisingRun(positions);
+    wanted.forEach((id, w) => staying.includes(w) || moved.add(id));
+  }
+
+  // The steps. Cue numbers that change are cleared first, so that none is still taken by another cue when it is set.
+  const steps = [];
+  const numberChanges = d => reused[d] < 0 || cues[reused[d]].number !== sheet[d].number;
+  for (const i of removed) {
+    if (cues[i].number !== "") {
+      steps.push(["clearNumber", cues[i].id]);
+    }
+  }
+  sheet.forEach((o, d) => {
+    if (reused[d] >= 0 && numberChanges(d) && cues[reused[d]].number !== "") {
+      steps.push(["clearNumber", cues[reused[d]].id]);
+    }
+  });
+
+  const files = qlab.files == null ? null : new Set(qlab.files.map(f => String(f).normalize("NFC")));
+  const missingFile = name => files != null && !files.has(String(name).normalize("NFC"));
+  const sections = new Map(); // lower-case row id -> { row, lines }
+  const lineIn = (key, sign, text, about = {}) => {
+    const row = key.split("/")[0];
+    if (!sections.has(lower(row))) {
+      sections.set(lower(row), { row, lines: [] });
+    }
+    sections.get(lower(row)).lines.push({ sign, text, key, ...about });
   };
-  return "{" + Object.entries(v).map(([k, x]) => `${k}:${x}`).join(", ") + "}";
+  const counts = { created: 0, updated: 0, moved: moved.size, renamed: renames.filter(r => r.accepted).length, removed: 0, kept: 0 };
+
+  sheet.forEach((o, d) => {
+    const c = cues[reused[d]];
+    const ref = refOf(d);
+    if (!c) {
+      steps.push(["create", ref, o.type, holderOf(o.parent)]);
+      lineIn(o.key, "+", `${o.number} ${o.values[0][1]} (new ${o.kind})`, { cue: { key: o.key, type: o.type, number: o.number, name: o.values[0][1] } });
+      counts.created++;
+    } else {
+      if (c.name.startsWith("REMOVED ")) {
+        steps.push(["restore", ref, c.name.slice(8)]);
+        lineIn(o.key, "^", `${o.number} comes back (it was marked REMOVED)`);
+      }
+      if (numberChanges(d)) {
+        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`, { renumber: [c.number, o.number] });
+      }
+      if (moved.has(c.id)) {
+        lineIn(o.key, ">", `${o.number} moves`);
+      }
+    }
+    if (numberChanges(d)) {
+      steps.push(["number", ref, o.number]);
+    }
+    if (o.target) {
+      const target = refOf(indexOfKey(o.target));
+      if (!c || c.target !== target) {
+        steps.push(["target", ref, target]);
+      }
+    }
+
+    // The Notes remember the sheet's values (also where the QLab value is kept, so it stays until the sheet changes
+    // again), except where they can't be set, so that those are tried again next time.
+    const remember = [];
+    let anySet = false;
+    let anyKept = false;
+    o.values.forEach(([name, value], vi) => {
+      const { verdict, qlab: qlabValue, last, missing } = verdicts[d][vi];
+      if (verdict === "set") {
+        steps.push(["set", ref, name, value, o.number]);
+        if (c && missing) {
+          // The old file is named after the one the sheet set last time (see sheetValues).
+          lineIn(o.key, "~", last == null || last === value
+            ? `${o.number} ${name}: ${qlabShownValue(name, value)} is missing in QLab, set again`
+            : `${o.number} ${name}: ${qlabShownValue(name, last)} (missing in QLab) → ${qlabShownValue(name, value)}`, { change: [name, last ?? "", value] });
+          anySet = true;
+        } else if (c) {
+          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`, { change: [name, qlabValue, value] });
+          anySet = true;
+        }
+        if (name === "file" && missingFile(value)) {
+          lineIn(o.key, "!", `${o.number} missing file ${qlab.mediaPath}/${value}`);
+        }
+      } else if (verdict === "keep") {
+        anyKept = true;
+        if (conflicts.some(q => q.id === `${o.key}#${name}`)) {
+          lineIn(o.key, "=", `${o.number} ${name}: keeps ${qlabShownValue(name, qlabValue)} from QLab (the sheet has ${qlabShownValue(name, value)})`);
+        }
+      }
+      remember.push([name, value, verdict === "set" ? last : value]);
+    });
+    if (o.files) {
+      remember.push(["files", o.files, o.files]);
+    }
+    steps.push(["notes", ref, o.key, remember, c ? c.extra : ""]);
+    counts.updated += anySet ? 1 : 0;
+    counts.kept += anyKept ? 1 : 0;
+  });
+
+  // Put the cues of each group, and of the cue list, in sheet order.
+  const holders = [];
+  for (const o of sheet) {
+    if (!holders.includes(o.parent)) {
+      holders.push(o.parent);
+    }
+  }
+  for (const parentKey of holders) {
+    steps.push(["place", holderOf(parentKey), sheet.map((o, d) => o.parent === parentKey ? refOf(d) : null).filter(r => r != null)]);
+  }
+
+  // The cues the sheet doesn't have anymore aren't deleted, but switched off and moved out of the way, to be deleted
+  // by hand: disarmed, without a number (cleared above), red, named "REMOVED ...", and at the end of the cue list (a
+  // removed group with what is inside it).
+  const removedIDs = removed.map(i => cues[i].id);
+  for (const i of removed) {
+    const c = cues[i];
+    const already = c.name.startsWith("REMOVED ");
+    steps.push(["remove", c.id, already ? "" : `REMOVED ${c.name}`, removedIDs.includes(c.parent) ? "no" : "yes"]);
+    if (!already) {
+      lineIn(oldKeys[i], "-", `${c.number || "(no number)"} ${c.name}: marked REMOVED`, { cue: { key: oldKeys[i], type: c.type, number: c.number, name: c.name } });
+      counts.removed++;
+    }
+  }
+  for (const i of duplicates) {
+    lineIn(oldKeys[i], "!", `${cues[i].number || "(no number)"} has the same key as another cue (copied in QLab?), so it is treated as added by hand`);
+  }
+
+  // The headers of the sections, and their lines in short. A new file also changes the names of the cues that show it.
+  const fileChanges = [...sections.values()].flatMap(s => s.lines).filter(l => l.change?.[0] === "file" && l.change[1]).map(l => l.change.slice(1));
+  const groups = new Set(sheet.filter(o => o.parent === "").map(o => lower(o.key)));
+  for (const s of sections.values()) {
+    const d = indexOfKey(s.row);
+    const rename = renames.find(r => r.accepted && lower(r.to) === lower(s.row));
+    s.status = rename ? "renamed" : d < 0 ? "removed" : reused[d] < 0 ? "new" : "changed";
+    s.header = rename ? `${rename.from} → ${s.row}` : s.row;
+    s.title = d >= 0 ? sheet[d].values[0][1] : (cues.find(c => lower(c.key) === lower(s.row))?.name ?? "").replace(/^REMOVED /, "");
+    s.summary = qlabSummaryLines(s, fileChanges);
+  }
+  const changes = [...sections.values()].reduce((n, s) => n + s.lines.filter(l => l.sign !== "=" && l.sign !== "!").length, 0);
+  const unchanged = [...groups].filter(row => !sections.has(row)).length;
+
+  // The sections in sheet order. A row removed from the sheet goes where it was in the cue list: after the row of the
+  // closest cue before it that is still in the sheet.
+  const rowOfKey = k => lower(k.split("/")[0]);
+  const positionOf = s => {
+    const d = indexOfKey(s.row);
+    if (d >= 0) {
+      return d;
+    }
+    const first = oldKeys.findIndex(k => k && rowOfKey(k) === lower(s.row));
+    for (let i = first - 1; i >= 0; i--) {
+      if (oldKeys[i] && indexOfKey(rowOfKey(oldKeys[i])) >= 0) {
+        return indexOfKey(rowOfKey(oldKeys[i])) + 0.5;
+      }
+    }
+    return -0.5;
+  };
+  const ordered = [...sections.values()].map(s => [positionOf(s), s]).sort((a, b) => a[0] - b[0]).map(([, s]) => s);
+  return { renames, conflicts, sections: ordered, unchanged, changes, counts, steps };
 }
+
+/**
+ * The lines of a section of the preview (see qlabPlan) in short: a new row or a row removed from the sheet is one line,
+ * and so is a row whose number changed together with the numbers of the cues in it (e.g. after a rename). Cue names
+ * that only change because they name a new file (fileChanges: [old file, new file] pairs) are counted in one line. A
+ * cue marked as removed and a new one of the same type with the same number or name (e.g. a fade-out of other media)
+ * are one line too. Problems are always shown.
+ */
+function qlabSummaryLines(section, fileChanges) {
+  const lines = section.lines;
+  const problems = lines.filter(l => l.sign === "!");
+  const count = sign => lines.filter(l => l.sign === sign).length;
+  if (section.status === "new" && count("+") + problems.length === lines.length) {
+    return [{ sign: "+", text: `new row, ${count("+")} cues` }, ...problems];
+  }
+  if (section.status === "removed" && count("-") + problems.length === lines.length) {
+    return [{ sign: "-", text: `${count("-")} cues marked REMOVED` }, ...problems];
+  }
+
+  const row = lines.find(l => l.renumber && !l.key.includes("/"));
+  const [from, to] = row ? row.renumber : [];
+  const followsRow = l => row && l !== row && l.renumber && l.renumber[0].startsWith(from) && l.renumber[1] === to + l.renumber[0].slice(from.length);
+  const followsFile = l => l.change?.[0] === "name" && fileChanges.some(([a, b]) => l.change[1].includes(a) && l.change[1].split(a).join(b) === l.change[2]);
+  const renumbered = lines.filter(followsRow).length;
+  const renamed = lines.filter(followsFile).length;
+
+  // The new cues that replace a removed one.
+  const replacing = new Map(); // "+" line -> its "-" line
+  for (const added of lines.filter(l => l.sign === "+" && l.cue)) {
+    const gone = lines.find(l => l.sign === "-" && l.cue && l.cue.type === added.cue.type && ![...replacing.values()].includes(l)
+      && (l.cue.number === added.cue.number || l.cue.name === added.cue.name));
+    if (gone) {
+      replacing.set(added, gone);
+    }
+  }
+  const targetOf = key => key.includes(":") ? key.slice(key.indexOf(":") + 1).replace("/", " ") : "";
+  const replaced = (added, gone) => {
+    const { cue: a } = added, { cue: g } = gone;
+    const change = g.name !== a.name ? `${g.name} → ${a.name}` : `${a.name}: target ${targetOf(g.key)} → ${targetOf(a.key)}`;
+    return { sign: "±", text: `${a.number} ${change} (replaced)` };
+  };
+
+  const replacedCues = [...replacing.values()];
+  const summary = lines.filter(l => !followsRow(l) && !followsFile(l) && !replacedCues.includes(l)).map(l =>
+    replacing.has(l) ? replaced(l, replacing.get(l))
+      : l !== row ? l
+        : { sign: "#", text: `${from || "(no number)"} → ${to}` + (renumbered ? `, and the ${renumbered} cues in it` : "") });
+  if (renamed) {
+    summary.push({ sign: "~", text: renamed === 1 ? "1 cue name follows the new file name" : `${renamed} cue names follow the new file names` });
+  }
+  return summary;
+}
+
+/**
+ * What to do with one value of an existing cue, from its value in QLab, in the sheet, and in the sheet last time (null
+ * if unknown): "same" (nothing to do), "set" (only the sheet changed it), "keep" (only QLab changed it) or "conflict"
+ * (both changed it).
+ */
+function qlabDecide(qlabValue, sheetValue, lastValue) {
+  if (qlabValue === sheetValue) {
+    return "same";
+  }
+  if (lastValue == null || qlabValue === lastValue) {
+    return "set";
+  }
+  return sheetValue === lastValue ? "keep" : "conflict";
+}
+
+/** A key with the row id `from` renamed to `to`, also where it names the media of that row (see generateQlab). */
+function qlabRenamedKey(k, from, to) {
+  if (k === from) {
+    return to;
+  }
+  if (k.startsWith(from + "/")) {
+    k = to + k.slice(from.length);
+  }
+  return k.split(`:${from}/`).join(`:${to}/`);
+}
+
+/** The items of a rising run (not necessarily adjacent) in a list of numbers that is as long as possible. */
+function qlabLongestRisingRun(seq) {
+  const best = []; // for each item: the length of the longest run that ends with it
+  const prior = []; // for each item: the index of the item before it in that run, or -1
+  let last = -1;
+  seq.forEach((x, i) => {
+    best.push(1);
+    prior.push(-1);
+    for (let j = 0; j < i; j++) {
+      if (seq[j] < x && best[j] + 1 > best[i]) {
+        best[i] = best[j] + 1;
+        prior[i] = j;
+      }
+    }
+    if (last < 0 || best[i] > best[last]) {
+      last = i;
+    }
+  });
+  const run = [];
+  for (let i = last; i >= 0; i = prior[i]) {
+    run.unshift(seq[i]);
+  }
+  return run;
+}
+
+/** A value as the preview shows it: times in seconds. */
+function qlabShownValue(name, value) {
+  if (value == null || value === "") {
+    return "nothing";
+  }
+  if (name === "preWait" || name === "duration") {
+    return `${Number(value) / 1000} s`;
+  }
+  if (name === "opacity") {
+    return String(Number(value) / 1000);
+  }
+  return `"${value}"`;
+}
+
+function qlabEscape(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * The preview of a plan (see qlabPlan) as HTML: the counts, the questions, and a section for each row with changes.
+ * `locked`: the answers can't be changed anymore (applied or cancelled).
+ */
+function qlabPreviewHtml(plan, locked) {
+  const esc = qlabEscape;
+  const out = [];
+  const c = plan.counts;
+  const counts = [[c.created, "cue created", "cues created"], [c.updated, "updated", "updated"], [c.moved, "moved", "moved"],
+    [c.renamed, "row renamed", "rows renamed"], [c.removed, "marked as removed", "marked as removed"],
+    [c.kept, "keeps values changed in QLab", "keep values changed in QLab"]];
+  out.push(`<div class="counts">${counts.map(([n, one, many]) => `<span class="count${n ? "" : " zero"}"><b>${n}</b> ${n === 1 ? one : many}</span>`).join("")}</div>`);
+
+  const question = (kind, id, text, options) => `<div class="question"><p>${text}</p>` + options.map(([value, label, checked]) =>
+    `<label><input type="radio" name="${esc(kind + ":" + id)}" data-question="${kind}" data-id="${esc(id)}" value="${value}"${checked ? " checked" : ""}${locked ? " disabled" : ""}> ${label}</label>`).join("") + "</div>";
+  if (plan.renames.length || plan.conflicts.length) {
+    out.push(`<section><h2>Questions</h2>`);
+    for (const r of plan.renames) {
+      out.push(question("rename", r.id, `Was row <b>${esc(r.from)}</b> renamed to <b>${esc(r.to)}</b>? They show the same files.`, [
+        ["yes", "Yes, it keeps its cues and the changes made in QLab", r.accepted],
+        ["no", "No, it is a removed row plus a new one", !r.accepted]]));
+    }
+    for (const q of plan.conflicts) {
+      out.push(question("conflict", q.id, `Cue <b>${esc(q.number)}</b> ${esc(q.name)} was changed in QLab and in the sheet.`, [
+        ["qlab", `Keep ${esc(qlabShownValue(q.name, q.qlab))} from QLab`, !q.takeSheet],
+        ["sheet", `Take ${esc(qlabShownValue(q.name, q.sheet))} from the sheet`, q.takeSheet]]));
+    }
+    out.push(`</section>`);
+  }
+
+  out.push(`<section><h2>Changes</h2>`);
+  if (plan.sections.length === 0) {
+    out.push(`<p class="none">The cue list already matches the sheet.</p>`);
+  } else {
+    const legend = [["+", "new"], ["~", "changed"], ["±", "replaced"], ["#", "renumbered"], [">", "moves"], ["-", "marked as removed"], ["^", "back from removed"], ["=", "kept from QLab"], ["!", "problem"]];
+    out.push(`<p class="legend">${legend.map(([sign, text]) => `<span data-sign="${esc(sign)}"><span class="sign">${esc(sign)}</span>${text}</span>`).join("")}</p>`);
+    out.push(`<p class="rows-legend"><span style="background: var(--row-new)"></span>new row<span style="background: var(--row-changed)"></span>changed row<span style="background: var(--row-removed)"></span>removed row</p>`);
+  }
+  const statusText = { new: "new row", removed: "removed from the sheet", renamed: "renamed", changed: "" };
+  for (const s of plan.sections) {
+    out.push(`<div class="row ${s.status}"><h3><span class="id">${esc(s.header)}</span> ${esc(s.title)}${statusText[s.status] ? ` <span class="tag">${statusText[s.status]}</span>` : ""}</h3>`);
+    const line = l => `<div class="line" data-sign="${esc(l.sign)}"><span class="sign">${esc(l.sign)}</span>${esc(l.text)}</div>`;
+    out.push(...s.summary.map(line));
+    if (s.summary.length !== s.lines.length || s.summary.some((l, i) => l !== s.lines[i])) {
+      out.push(`<details><summary>${s.lines.length === 1 ? "The change" : `All ${s.lines.length} changes`}</summary>`, ...s.lines.map(line), `</details>`);
+    }
+    out.push(`</div>`);
+  }
+  if (plan.unchanged) {
+    out.push(`<p class="unchanged">${plan.unchanged} ${plan.unchanged === 1 ? "row" : "rows"} without changes.</p>`);
+  }
+  out.push(`</section>`);
+  return out.join("\n");
+}
+
+/**
+ * The preview page of the update script (see qlabPage). The script fills in the title and the cue list as it is, saves
+ * the page next to the workspace and opens it in Safari. The page plans the update (qlabPlan) and shows it, plans
+ * again whenever a question is answered, and on Apply hands the steps to the script, which reads window.zest. The
+ * script then reports how it went (zestDone) and saves the page again, so that it also logs the update.
+ */
+const QLAB_PAGE = String.raw`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%%PAGE_TITLE%%</title>
+<style>
+:root {
+  color-scheme: dark; /* always dark, like QLab */
+  --bg: #1c1c1e; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --card: #2c2c2e;
+  --add: #3fb950; --remove: #ff6b6b; --change: #58a6ff; --keep: #d29922; --problem: #f0883e; --accent: #0a84ff;
+  --row-new: #3fb950; --row-new-bg: #3fb9501f; --row-changed: #e3b341; --row-changed-bg: #e3b3411a;
+  --row-removed: #f85149; --row-removed-bg: #f851491f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 28px 16px 110px; }
+h1 { font-size: 22px; margin: 0 0 2px; }
+.sub { color: var(--muted); margin: 0 0 18px; }
+.counts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 26px; }
+.count { background: var(--card); border-radius: 8px; padding: 5px 10px; }
+.count b { font-variant-numeric: tabular-nums; }
+.count.zero { color: var(--muted); }
+section { margin: 0 0 30px; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+.question { background: var(--card); border-left: 3px solid var(--keep); border-radius: 6px; padding: 10px 14px; margin: 0 0 10px; }
+.question p { margin: 0 0 6px; }
+.question label { display: block; padding: 2px 0; }
+.legend { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+.legend > span { margin-right: 14px; white-space: nowrap; }
+.legend .sign { width: 1.3em; }
+.row { border-left: 4px solid var(--line); border-radius: 6px; padding: 10px 14px; margin: 0 0 10px; background: var(--card); }
+.row.new { border-left-color: var(--row-new); background: var(--row-new-bg); }
+.row.changed, .row.renamed { border-left-color: var(--row-changed); background: var(--row-changed-bg); }
+.row.removed { border-left-color: var(--row-removed); background: var(--row-removed-bg); }
+.rows-legend { color: var(--muted); font-size: 13px; margin: -4px 0 14px; }
+.rows-legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 5px 0 12px; }
+.rows-legend span:first-child { margin-left: 0; }
+.row h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.row .id { font-family: ui-monospace, Menlo, monospace; }
+.tag { font-size: 12px; font-weight: 500; border-radius: 4px; padding: 1px 6px; margin-left: 4px; background: var(--card); color: var(--muted); }
+.row.new .tag { color: var(--add); }
+.row.removed .tag { color: var(--remove); }
+.row.renamed .tag { color: var(--change); }
+.line { font: 13px/1.5 ui-monospace, Menlo, monospace; padding-left: 1.8em; text-indent: -1.8em; }
+.sign { display: inline-block; width: 1.8em; text-indent: 0; font-weight: 700; }
+[data-sign="+"] .sign, [data-sign="^"] .sign { color: var(--add); }
+[data-sign="-"] .sign { color: var(--remove); }
+[data-sign="~"] .sign, [data-sign="±"] .sign, [data-sign="#"] .sign, [data-sign=">"] .sign { color: var(--change); }
+[data-sign="="] .sign { color: var(--keep); }
+[data-sign="!"] { color: var(--problem); }
+details { margin: 4px 0 0 1.8em; }
+details summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+.none, .unchanged { color: var(--muted); }
+.result { border-radius: 6px; padding: 10px 14px; margin: 0 0 26px; background: var(--card); border-left: 3px solid var(--add); }
+.result.problems { border-left-color: var(--problem); }
+.result p { margin: 0 0 4px; }
+.bar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: 12px 16px; }
+.bar div { max-width: 860px; margin: 0 auto; display: flex; gap: 12px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.bar .message { margin-right: auto; color: var(--muted); }
+button { font: inherit; padding: 7px 18px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+<h1>%%SHOW%%: QLab update</h1>
+<p class="sub">%%PAGE_TITLE%%</p>
+<div id="result"></div>
+<div id="preview"></div>
+</main>
+<div class="bar"><div id="bar"></div></div>
+<script id="saved" type="application/json"></script>
+<script>
+var SHEET = %%SHEET%%;
+// The cue list as it was when the script ran: [listID, mediaPath, whether the media folder could be read, the files in
+// it, the cues (see scanCues in the script)].
+var STATE = %%QLAB_STATE%%;
+
+%%CODE%%
+
+var QLAB = {
+  listID: STATE[0],
+  mediaPath: STATE[1],
+  files: STATE[2] ? STATE[3] : null,
+  cues: STATE[4].map(function (c) {
+    return { id: c[0], type: c[1], parent: c[2], number: c[3], name: c[4], notes: c[5], target: c[6], values: c[7] };
+  }),
+};
+
+// After the update, the script saves this page with the answers and the result in #saved.
+var saved = null;
+try {
+  saved = JSON.parse(document.getElementById("saved").textContent || "null");
+} catch (e) {}
+var answers = saved ? saved.answers : { notRenamed: [], takeSheet: [] };
+var plan = null;
+// What the script reads: waiting, apply (with the steps), cancel, or done.
+window.zest = { state: saved ? "done" : "waiting" };
+
+function render() {
+  var state = window.zest.state;
+  plan = qlabPlan(SHEET, QLAB, answers);
+  document.getElementById("preview").innerHTML = qlabPreviewHtml(plan, state !== "waiting");
+  var nothing = plan.changes === 0 && plan.renames.length === 0 && plan.conflicts.length === 0;
+  var bar = "";
+  if (state === "waiting" && nothing) {
+    bar = '<span class="message">Nothing to update.</span><button onclick="cancel()">Close</button>';
+  } else if (state === "waiting") {
+    bar = '<span class="message">Nothing changes in QLab until you click Apply.</span>' +
+      '<button onclick="cancel()">Cancel</button><button class="primary" onclick="apply()">Apply ' + plan.changes + (plan.changes === 1 ? " change" : " changes") + "</button>";
+  } else if (state === "apply") {
+    bar = '<span class="message">Applying in QLab…</span>';
+  } else if (state === "cancel") {
+    bar = '<span class="message">Cancelled, nothing was changed. You can close this page.</span>';
+  } else {
+    bar = '<span class="message">Applied ' + qlabEscape(saved.at) + ".</span>";
+  }
+  document.getElementById("bar").innerHTML = bar;
+
+  var result = "";
+  if (saved) {
+    var problems = saved.problems;
+    result = '<div class="result' + (problems.length ? " problems" : "") + '"><p><b>Applied ' + qlabEscape(saved.at) + ".</b> " +
+      (problems.length ? problems.length + (problems.length === 1 ? " problem:" : " problems:") : "No problems.") + "</p>" +
+      problems.map(function (p) { return '<div class="line" data-sign="!"><span class="sign">!</span>' + qlabEscape(p) + "</div>"; }).join("") + "</div>";
+  }
+  document.getElementById("result").innerHTML = result;
+}
+
+document.addEventListener("change", function (e) {
+  var input = e.target;
+  if (!input.dataset || !input.dataset.question) return;
+  var id = input.dataset.id;
+  if (input.dataset.question === "rename") {
+    answers.notRenamed = answers.notRenamed.filter(function (x) { return x !== id; });
+    if (input.value === "no") answers.notRenamed.push(id);
+  } else {
+    answers.takeSheet = answers.takeSheet.filter(function (x) { return x !== id; });
+    if (input.value === "sheet") answers.takeSheet.push(id);
+  }
+  render();
+});
+
+function apply() {
+  window.zest = { state: "apply", steps: plan.steps };
+  render();
+}
+
+function cancel() {
+  window.zest = { state: "cancel" };
+  render();
+}
+
+// Called by the script once it has carried out the steps.
+function zestDone(problems) {
+  saved = { answers: answers, problems: problems, at: new Date().toLocaleString() };
+  document.getElementById("saved").textContent = JSON.stringify(saved).replace(/</g, "\\u003c");
+  window.zest = { state: "done" };
+  render();
+}
+
+render();
+</script>
+</body>
+</html>
+`;
 
 const QLAB_SCRIPT_TEMPLATE = `-- Generated by the ZEST cue list sheet ("ZEST > Generate QLab script"). Do not edit by hand.
 -- Show: %%SHOW%%
 -- Run this on the QLab Mac with the show workspace open (open in Script Editor, press Run).
 -- %%PURPOSE%%
 
+use AppleScript version "2.4"
+use framework "Foundation" -- for JSON
+use scripting additions
+
 property cueListName : %%CUE_LIST%%
 property mediaFolder : %%MEDIA_FOLDER%% -- relative to the folder containing the workspace, or an absolute path
 property rebuild : %%REBUILD%% -- true: delete the cue list and build it again; false: update it in place
 property mediaPath : "" -- the full path of the media folder, see below
+property theList : missing value
 property theListID : "" -- the uniqueID of the cue list
 
--- The cues of the sheet (see toAppleScriptRecord in qlab.js) and their keys.
-property ops : {}
-property wantedKeys : {}
-
--- The keys (see generateQlab) and uniqueIDs of the cues of the sheet, once they exist, and the ones created by this run.
-property cueKeys : {}
-property cueIDs : {}
-property newIDs : {}
-
--- The cues that were in the cue list before this run (see scanCues). The key is "" for cues added by hand.
-property oldIDs : {}
-property oldKeys : {} -- with the accepted renames (see planUpdate)
-property originalKeys : {} -- as they are in the Notes
-property oldTypes : {}
-property oldNotes : {}
-property oldParents : {} -- the uniqueID of the group or cue list each cue is in
-property oldNumbers : {}
-property oldNames : {}
-
--- Rows that look renamed (see below), and the ones accepted as renamed.
-property renameFrom : {}
-property renameTo : {}
-property renameTexts : {}
-property accepted : {}
-
--- The values both the sheet and QLab changed, and the ones to take from the sheet (by conflictKey).
-property conflictTexts : {}
-property conflictKeys : {}
-property takeSheet : {}
-
--- The plan (see planUpdate).
-property reused : {} -- for each cue of the sheet: the index (in oldIDs) of the existing cue it reuses, or 0
-property removed : {} -- the indexes of the existing cues with a key the sheet doesn't have anymore
-property duplicates : {} -- the indexes of the cues with the same key as another one (e.g. copied in QLab)
-property planVerdicts : {} -- for each cue of the sheet: what to do with each of its values (see decide)
-property planLast : {} -- for each cue of the sheet: the sheet's value of each of its values last time
-property planMoved : {} -- the uniqueIDs of the existing cues that have to move
-property planQlab : {} -- for each cue of the sheet: the QLab value of each of its values (for the preview)
-property previewFile : "" -- the file with the preview of the plan, which also logs the result
-
+property scanned : {} -- the cues in the cue list (see scanCues)
+property createdRefs : {} -- the cues created by this run, as "new:<key>" (see qlabPlan in qlab.js)
+property createdIDs : {} -- and their uniqueIDs
+property failedValues : {} -- the values that couldn't be set, as "<cue>#<value name>"
 property problems : {}
 
--- The index of x in the list, or 0. Ignores case, like cue ids (q12 and Q12 are the same row), so keys written before
--- cue ids were upper case still match.
+-- JSON, with macOS's built-in Foundation.
+on toJSON(x)
+  set {jsonData, jsonError} to current application's NSJSONSerialization's dataWithJSONObject:x options:0 |error|:(reference)
+  if jsonData is missing value then error (jsonError's localizedDescription() as text)
+  return (current application's NSString's alloc()'s initWithData:jsonData encoding:(current application's NSUTF8StringEncoding)) as text
+end toJSON
+
+-- Lists come back as lists, objects as records, null as missing value.
+on fromJSON(t)
+  set jsonData to (current application's NSString's stringWithString:t)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
+  set {x, jsonError} to current application's NSJSONSerialization's JSONObjectWithData:jsonData options:0 |error|:(reference)
+  if x is missing value then error (jsonError's localizedDescription() as text)
+  return item 1 of ((current application's NSArray's arrayWithObject:x) as list)
+end fromJSON
+
+-- (open for access with POSIX file doesn't work in a script that uses Foundation.)
+on writeText(p, t)
+  set {ok, writeError} to (current application's NSString's stringWithString:t)'s writeToFile:p atomically:true encoding:(current application's NSUTF8StringEncoding) |error|:(reference)
+  if not (ok as boolean) then error (writeError's localizedDescription() as text)
+end writeText
+
+on replaceText(t, search, replacement)
+  set AppleScript's text item delimiters to search
+  set parts to text items of t
+  set AppleScript's text item delimiters to replacement
+  set t to parts as text
+  set AppleScript's text item delimiters to ""
+  return t
+end replaceText
+
+on joinText(parts, separator)
+  set AppleScript's text item delimiters to separator
+  set joined to parts as text
+  set AppleScript's text item delimiters to ""
+  return joined
+end joinText
+
 on indexOf(lst, x)
-  ignoring case
+  considering case
     repeat with i from 1 to count of lst
       if item i of lst is x then return i
     end repeat
-  end ignoring
+  end considering
   return 0
 end indexOf
 
--- The uniqueID of the cue with the given key.
-on idOfKey(k)
-  set i to my indexOf(cueKeys, k)
-  if i is 0 then error "no cue with the key " & k
-  return item i of cueIDs
-end idOfKey
+-- The uniqueID of a cue named by a step (see qlabPlan in qlab.js).
+on idOf(cueRef)
+  if cueRef is "list" then return theListID
+  if cueRef starts with "new:" then
+    set i to my indexOf(createdRefs, cueRef)
+    if i is 0 then error "no cue " & cueRef
+    return item i of createdIDs
+  end if
+  return cueRef
+end idOf
 
 -- Seconds or an opacity as whole thousandths, as in the values from the sheet (see sheetValues in qlab.js).
 on thousandths(x)
@@ -436,21 +1120,16 @@ on fileName(p)
   return n
 end fileName
 
-on joinText(parts, separator)
-  set AppleScript's text item delimiters to separator
-  set joined to parts as text
-  set AppleScript's text item delimiters to ""
-  return joined
-end joinText
+-- The values the sheet controls for each cue type (see sheetValues in qlab.js).
+on valueNames(cueType)
+  if cueType is "Group" then return {"name", "continue", "preWait"}
+  if cueType is "Video" then return {"name", "continue", "file", "stage", "opacity", "loop", "layer"}
+  if cueType is "Camera" then return {"name", "continue", "stage", "opacity", "layer"}
+  if cueType is "Fade" then return {"name", "continue", "duration", "opacity", "stopWhenDone"}
+  return {"name", "continue"}
+end valueNames
 
--- The lines of the Notes after the key and the remembered values (anything added in QLab), or "".
-on extraNotes(n)
-  set noteLines to paragraphs of n
-  if (count of noteLines) < 3 then return ""
-  return linefeed & my joinText(items 3 thru -1 of noteLines, linefeed)
-end extraNotes
-
--- Reads one value the sheet controls (see sheetValues in qlab.js), as text like the sheet's ("" if there is none).
+-- Reads one value the sheet controls, as text like the sheet's ("" if there is none).
 on getValue(c, n)
   set v to my readValue(c, n)
   if v is missing value then return ""
@@ -461,7 +1140,7 @@ on readValue(c, n)
   tell application id "com.figure53.QLab.5"
     try
       if n is "name" then
-        -- Without the mark of a removed cue (see below), which goes away when its row comes back.
+        -- Without the mark of a removed cue (see qlabPlan), which goes away when its row comes back.
         set cueName to q name of c
         if cueName starts with "REMOVED " then return text 9 thru -1 of cueName
         return cueName
@@ -485,59 +1164,19 @@ on readValue(c, n)
   return ""
 end readValue
 
--- A key with the row id fromRow renamed to toRow, also where it names the media of that row (see generateQlab).
-on renamedKey(k, fromRow, toRow)
-  considering case
-    if k is fromRow then return toRow
-    if k starts with (fromRow & "/") then set k to toRow & (text ((length of fromRow) + 1) thru -1 of k)
-    set AppleScript's text item delimiters to ":" & fromRow & "/"
-    set parts to text items of k
-    set AppleScript's text item delimiters to ":" & toRow & "/"
-    set k to parts as text
-    set AppleScript's text item delimiters to ""
-  end considering
-  return k
-end renamedKey
-
--- The value the sheet had last time, from the second line of the Notes (see sheetValues in qlab.js), or missing value.
-on rememberedValue(n, valueName)
-  set noteLines to paragraphs of n
-  if (count of noteLines) < 2 then return missing value
-  set AppleScript's text item delimiters to "|"
-  set pairs to text items of (item 2 of noteLines)
-  set AppleScript's text item delimiters to ""
-  considering case
-    repeat with pair in pairs
-      set pairText to contents of pair
-      if pairText is (valueName & "=") then return ""
-      if pairText starts with (valueName & "=") then return text ((length of valueName) + 2) thru -1 of pairText
-    end repeat
-  end considering
-  return missing value
-end rememberedValue
-
--- What to do with one value of an existing cue, from its value in QLab, in the sheet, and in the sheet last time
--- (missing value if unknown): "same" (nothing to do), "set" (only the sheet changed it), "keep" (only QLab changed it)
--- or "conflict" (both changed it).
-on decide(qlabValue, sheetValue, lastValue)
-  considering case
-    if qlabValue is sheetValue then return "same"
-    if lastValue is missing value or qlabValue is lastValue then return "set"
-    if sheetValue is lastValue then return "keep"
-  end considering
-  return "conflict"
-end decide
-
--- A value as it is shown in dialogs: times in seconds.
-on shownValue(valueName, v)
-  if v is "" then return "nothing"
-  if valueName is in {"preWait", "duration"} then return (((v as integer) / 1000) as text) & " s"
-  if valueName is "opacity" then return ((v as integer) / 1000) as text
-  return "\\"" & v & "\\""
-end shownValue
-
--- Sets one value the sheet controls (see sheetValues in qlab.js). Returns a problem, or "" if it worked.
+-- Sets one value the sheet controls. Returns a problem, or "" if it worked.
 on setValue(c, n, v)
+  if n is "file" then
+    set f to mediaPath & "/" & v
+    try
+      do shell script "test -e " & quoted form of f
+    on error
+      return "missing file " & f
+    end try
+    set fileRef to (current application's NSURL's fileURLWithPath:f) as «class furl»
+    tell application id "com.figure53.QLab.5" to set file target of c to fileRef
+    return ""
+  end if
   tell application id "com.figure53.QLab.5"
     if n is "name" then
       set q name of c to v
@@ -552,14 +1191,6 @@ on setValue(c, n, v)
       end if
     else if n is "preWait" then
       set pre wait of c to (v as integer) / 1000
-    else if n is "file" then
-      set f to mediaPath & "/" & v
-      try
-        tell current application to do shell script "test -e " & quoted form of f
-      on error
-        return "missing file " & f
-      end try
-      set file target of c to POSIX file f
     else if n is "stage" then
       try
         set stage name of c to v
@@ -581,26 +1212,31 @@ on setValue(c, n, v)
   return ""
 end setValue
 
--- Records every cue in the cue list or group, and in its groups, with its key (see generateQlab).
+-- Records every cue in the cue list or group, and in its groups, as {uniqueID, type, uniqueID of the group or cue
+-- list, number, name, Notes, uniqueID of the target, values}. The values are read only for the cues with a key (see
+-- generateQlab in qlab.js), as {name, value} pairs.
 on scanCues(holder)
   tell application id "com.figure53.QLab.5"
     repeat with c in (cues of holder)
       set cc to contents of c
-      set n to ""
+      set cueNotes to ""
       try
-        set n to notes of cc
+        set cueNotes to notes of cc
       end try
-      if n is missing value then set n to ""
-      set k to ""
-      if n starts with "zest:" and (length of paragraph 1 of n) > 5 then set k to text 6 thru -1 of (paragraph 1 of n)
-      set end of oldIDs to uniqueID of cc
-      set end of oldKeys to k
-      set end of oldTypes to q type of cc
-      set end of oldNotes to n
-      set end of oldParents to uniqueID of holder
-      set end of oldNumbers to q number of cc
-      set end of oldNames to q name of cc
-      if q type of cc is "Group" then my scanCues(cc)
+      if cueNotes is missing value then set cueNotes to ""
+      set cueType to q type of cc
+      set cueValues to {}
+      set targetID to ""
+      if cueNotes starts with "zest:" then
+        repeat with valueName in my valueNames(cueType)
+          set end of cueValues to {contents of valueName, my getValue(cc, contents of valueName)}
+        end repeat
+        try
+          set targetID to uniqueID of (cue target of cc)
+        end try
+      end if
+      set end of scanned to {uniqueID of cc, cueType, uniqueID of holder, q number of cc, q name of cc, cueNotes, targetID, cueValues}
+      if cueType is "Group" then my scanCues(cc)
     end repeat
   end tell
 end scanCues
@@ -613,173 +1249,6 @@ on moveToEnd(cueID, holder)
     end tell
   end tell
 end moveToEnd
-
-
--- The items of a rising run (not necessarily adjacent) in a list of numbers that is as long as possible.
-on longestRisingRun(seq)
-  set best to {} -- for each item: the length of the longest run that ends with it
-  set priorIndexes to {} -- for each item: the index of the item before it in that run, or 0
-  set longest to 0
-  set lastIndex to 0
-  repeat with i from 1 to count of seq
-    set b to 1
-    set prior to 0
-    repeat with j from 1 to i - 1
-      if (item j of seq) < (item i of seq) and (item j of best) + 1 > b then
-        set b to (item j of best) + 1
-        set prior to j
-      end if
-    end repeat
-    set end of best to b
-    set end of priorIndexes to prior
-    if b > longest then
-      set longest to b
-      set lastIndex to i
-    end if
-  end repeat
-  set chosen to {}
-  set i to lastIndex
-  repeat while i > 0
-    set beginning of chosen to item i of seq
-    set i to item i of priorIndexes
-  end repeat
-  return chosen
-end longestRisingRun
-
--- The row id in a key (see generateQlab).
-on rowOf(k)
-  if k contains "/" then return text 1 thru ((offset of "/" in k) - 1) of k
-  return k
-end rowOf
-
-on shownNumber(n)
-  if n is "" then return "(no number)"
-  return n
-end shownNumber
-
--- The plan as text, like a diff: a section for each row with a line for each change. Returns {the text, the number
--- of changes}.
-on previewText()
-  set sectionKeys to {}
-  set sectionLines to {} -- for each section: its lines
-  set createdCount to 0
-  set updatedCount to 0
-  set keptCount to 0
-  set changeCount to 0
-  repeat with d from 1 to count of ops
-    set o to item d of ops
-    set i to item d of reused
-    set verdicts to item d of planVerdicts
-    set qlabValues to item d of planQlab
-    set rowLines to {}
-    if i is 0 then
-      set end of rowLines to "  + " & (zNum of o) & " " & (item 2 of item 1 of (zValues of o)) & " (new " & (zKind of o) & ")"
-      set createdCount to createdCount + 1
-    else
-      if (item i of oldNames) starts with "REMOVED " then set end of rowLines to "  ^ " & (zNum of o) & " comes back (it was marked REMOVED)"
-      considering case
-        if (item i of oldNumbers) is not (zNum of o) then set end of rowLines to "  # " & my shownNumber(item i of oldNumbers) & " -> " & (zNum of o)
-      end considering
-      if planMoved contains {item i of oldIDs} then set end of rowLines to "  > " & (zNum of o) & " moves"
-    end if
-    set anySet to false
-    set anyKept to false
-    repeat with vi from 1 to count of (zValues of o)
-      set n to item 1 of item vi of (zValues of o)
-      set v to item 2 of item vi of (zValues of o)
-      set verdict to item vi of verdicts
-      if verdict is "set" and i is not 0 then
-        set anySet to true
-        set end of rowLines to "  ~ " & (zNum of o) & " " & n & ": " & my shownValue(n, item vi of qlabValues) & " -> " & my shownValue(n, v)
-      else if verdict is "keep" then
-        set anyKept to true
-        if conflictKeys contains {(d as text) & "/" & n} then set end of rowLines to "  = " & (zNum of o) & " " & n & ": keeps " & my shownValue(n, item vi of qlabValues) & " from QLab (the sheet has " & my shownValue(n, v) & ")"
-      end if
-      if verdict is "set" and n is "file" then
-        try
-          do shell script "test -e " & quoted form of (mediaPath & "/" & v)
-        on error
-          set end of rowLines to "  ! " & (zNum of o) & " missing file " & mediaPath & "/" & v
-        end try
-      end if
-    end repeat
-    if anySet then set updatedCount to updatedCount + 1
-    if anyKept then set keptCount to keptCount + 1
-    if rowLines is not {} then
-      set s to my indexOf(sectionKeys, my rowOf(zKey of o))
-      if s is 0 then
-        set end of sectionKeys to my rowOf(zKey of o)
-        set end of sectionLines to {}
-        set s to count of sectionKeys
-      end if
-      repeat with x in rowLines
-        set end of item s of sectionLines to contents of x
-      end repeat
-    end if
-  end repeat
-
-  -- The cues that are newly marked as removed, with the row they belonged to.
-  set removedCount to 0
-  repeat with r from 1 to count of removed
-    set i to item r of removed
-    if (item i of oldNames) does not start with "REMOVED " then
-      set removedCount to removedCount + 1
-      set rowKey to my rowOf(item i of oldKeys)
-      set s to my indexOf(sectionKeys, rowKey)
-      if s is 0 then
-        set end of sectionKeys to rowKey
-        set end of sectionLines to {}
-        set s to count of sectionKeys
-      end if
-      set end of item s of sectionLines to "  - " & my shownNumber(item i of oldNumbers) & " " & (item i of oldNames) & ": marked REMOVED"
-    end if
-  end repeat
-
-  set out to {cueListName & ": " & createdCount & " cues created, " & updatedCount & " updated, " & (count of planMoved) & " moved, " & (count of accepted) & " rows renamed, " & removedCount & " marked as removed. " & keptCount & " cues keep values changed in QLab.", ""}
-  set end of out to "+ new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem"
-
-  -- The questions, with the current answers.
-  if renameTexts is not {} or conflictTexts is not {} then
-    set end of out to ""
-    set end of out to "Questions (to change the answers, click Change choices... in the dialog)"
-    repeat with r from 1 to count of renameTexts
-      if accepted contains {r} then
-        set answer to "yes, it keeps its cues"
-      else
-        set answer to "no, it is a removed row plus a new one"
-      end if
-      set end of out to "  ? " & (item r of renameTexts) & ": " & answer
-    end repeat
-    repeat with q from 1 to count of conflictTexts
-      if takeSheet contains {item q of conflictKeys} then
-        set answer to "takes the sheet's value"
-      else
-        set answer to "keeps the QLab value"
-      end if
-      set end of out to "  ? " & (item q of conflictTexts) & ": " & answer
-    end repeat
-  end if
-  repeat with s from 1 to count of sectionKeys
-    set rowKey to item s of sectionKeys
-    set header to rowKey
-    set d to my indexOf(wantedKeys, rowKey)
-    set r to my indexOf(renameTo, rowKey)
-    if r is not 0 and accepted contains {r} then
-      set header to (item r of renameFrom) & " -> " & rowKey & " (renamed)"
-    else if d is 0 then
-      set header to rowKey & " (removed from the sheet)"
-    else if (item d of reused) is 0 then
-      set header to rowKey & " (new row)"
-    end if
-    set end of out to ""
-    set end of out to header
-    repeat with x in item s of sectionLines
-      set end of out to contents of x
-      if (contents of x) does not start with "  =" and (contents of x) does not start with "  !" then set changeCount to changeCount + 1
-    end repeat
-  end repeat
-  return {my joinText(out, linefeed), changeCount}
-end previewText
 
 -- Puts the cues \`wanted\` (uniqueIDs, in sheet order) into the cue list or group in this order. Other cues in it
 -- (e.g. added by hand) stay right after the cue they follow now, and the ones before the first cue of the sheet stay
@@ -821,153 +1290,135 @@ on placeCues(holder, wanted)
   end repeat
 end placeCues
 
--- Matches the cues of the sheet to the existing ones by key (with the accepted renames). A cue is reused only if it
--- still has the same type (e.g. a video that becomes a camera is replaced). Sets reused, removed and duplicates.
-on matchCues()
-  set reused to {}
-  repeat (count of ops) times
-    set end of reused to 0
-  end repeat
-  set removed to {}
-  set duplicates to {}
-  repeat with i from 1 to count of oldIDs
-    set k to item i of oldKeys
-    if k is not "" then
-      set d to my indexOf(wantedKeys, k)
-      if d is 0 or (item i of oldTypes) is not (zType of item d of ops) then
-        set end of removed to i
-      else if (item d of reused) is not 0 then
-        set end of duplicates to i
-      else
-        set item d of reused to i
-      end if
-    end if
-  end repeat
-end matchCues
-
--- Works out everything the update will change, without changing anything yet: which existing cue each cue of the
--- sheet reuses (with the accepted renames), what to do with each of its values (see decide; a value both changed is
--- taken from the sheet if its conflictKey is in takeSheet), and which existing cues have to move.
-on planUpdate()
-  copy originalKeys to oldKeys
-  repeat with acceptedIndex from 1 to count of accepted
-    set r to item acceptedIndex of accepted
-    repeat with i from 1 to count of oldKeys
-      set item i of oldKeys to my renamedKey(item i of oldKeys, item r of renameFrom, item r of renameTo)
-    end repeat
-  end repeat
-  my matchCues()
-
-  -- The values.
-  set planVerdicts to {}
-  set planLast to {}
-  set planQlab to {}
-  set conflictTexts to {}
-  set conflictKeys to {}
-  repeat with d from 1 to count of ops
-    set o to item d of ops
-    set i to item d of reused
-    set verdicts to {}
-    set lasts to {}
-    set qlabValues to {}
-    if i is not 0 then
-      tell application id "com.figure53.QLab.5" to tell front workspace to set c to cue id (item i of oldIDs)
-    end if
-    repeat with p in (zValues of o)
-      set n to item 1 of p
-      set v to item 2 of p
-      if i is 0 then
-        set end of verdicts to "set"
-        set end of lasts to missing value
-        set end of qlabValues to missing value
-      else
-        set qlabValue to my getValue(c, n)
-        set lastValue to my rememberedValue(item i of oldNotes, n)
-        set verdict to my decide(qlabValue, v, lastValue)
-        if verdict is "conflict" then
-          set conflictKey to (d as text) & "/" & n
-          set end of conflictTexts to (((count of conflictTexts) + 1) as text) & ". cue " & (zNum of o) & " " & n & ": " & my shownValue(n, qlabValue) & " in QLab, " & my shownValue(n, v) & " in the sheet"
-          set end of conflictKeys to conflictKey
-          if takeSheet contains {conflictKey} then
-            set verdict to "set"
-          else
-            set verdict to "keep"
+-- Carries out the steps planned by qlabPlan (see there). Stops at the first one that fails unexpectedly.
+on runSteps(steps)
+  set stepIndex to 0
+  try
+    tell application id "com.figure53.QLab.5"
+      tell front workspace
+        repeat with s in steps
+          set stepIndex to stepIndex + 1
+          set stepItems to contents of s
+          set stepKind to item 1 of stepItems
+          if stepKind is "clearNumber" then
+            set q number of cue id (item 2 of stepItems) to ""
+          else if stepKind is "create" then
+            make type (item 3 of stepItems)
+            set c to last item of (selected as list)
+            set end of createdRefs to item 2 of stepItems
+            set end of createdIDs to uniqueID of c
+            if (item 3 of stepItems) is "Fade" then set do opacity of c to true
+            if (item 4 of stepItems) is "list" then
+              move cue id (uniqueID of c) of parent of c to end of theList
+            else
+              move cue id (uniqueID of c) of parent of c to end of cue id (my idOf(item 4 of stepItems))
+            end if
+          else if stepKind is "restore" then
+            set c to cue id (my idOf(item 2 of stepItems))
+            set q name of c to item 3 of stepItems
+            set armed of c to true
+            set q color of c to "none"
+          else if stepKind is "number" then
+            set c to cue id (my idOf(item 2 of stepItems))
+            set q number of c to item 3 of stepItems
+            if q number of c is not (item 3 of stepItems) then
+              set end of problems to "cue number " & (item 3 of stepItems) & " is already used elsewhere in the workspace"
+            end if
+          else if stepKind is "target" then
+            set cue target of cue id (my idOf(item 2 of stepItems)) to cue id (my idOf(item 3 of stepItems))
+          else if stepKind is "set" then
+            set problem to my setValue(cue id (my idOf(item 2 of stepItems)), item 3 of stepItems, item 4 of stepItems)
+            if problem is not "" then
+              set end of problems to "cue " & (item 5 of stepItems) & ": " & problem
+              set end of failedValues to (item 2 of stepItems) & "#" & (item 3 of stepItems)
+            end if
+          else if stepKind is "notes" then
+            set remembered to {}
+            repeat with p in (item 4 of stepItems)
+              set keptText to item 2 of p
+              if failedValues contains {(item 2 of stepItems) & "#" & (item 1 of p)} then set keptText to item 3 of p
+              if keptText is not missing value then set end of remembered to (item 1 of p) & "=" & keptText
+            end repeat
+            set notes of cue id (my idOf(item 2 of stepItems)) to "zest:" & (item 3 of stepItems) & linefeed & my joinText(remembered, "|") & (item 5 of stepItems)
+          else if stepKind is "place" then
+            set wanted to {}
+            repeat with r in (item 3 of stepItems)
+              set end of wanted to my idOf(contents of r)
+            end repeat
+            if (item 2 of stepItems) is "list" then
+              my placeCues(theList, wanted)
+            else
+              my placeCues(cue id (my idOf(item 2 of stepItems)), wanted)
+            end if
+          else if stepKind is "remove" then
+            set c to cue id (item 2 of stepItems)
+            if (item 3 of stepItems) is not "" then set q name of c to item 3 of stepItems
+            set armed of c to false
+            set q color of c to "red"
+            if (item 4 of stepItems) is "yes" then my moveToEnd(item 2 of stepItems, theList)
           end if
-        end if
-        set end of verdicts to verdict
-        set end of lasts to lastValue
-        set end of qlabValues to qlabValue
-      end if
-    end repeat
-    set end of planVerdicts to verdicts
-    set end of planLast to lasts
-    set end of planQlab to qlabValues
-  end repeat
+        end repeat
+      end tell
+    end tell
+  on error e
+    set end of problems to "stopped at step " & stepIndex & " of " & (count of steps) & " (" & e & "), the rest wasn't done"
+  end try
+end runSteps
 
-  -- The moves. In each group (and the cue list), the existing cues of the sheet that form the longest run in sheet
-  -- order already stay; the others move, and so do the ones that come from another group.
-  set planMoved to {}
-  set parentKeys to {}
-  set parentCues to {} -- for each parent key: the existing cues that go in it, in sheet order
-  repeat with d from 1 to count of ops
-    set i to item d of reused
-    if i is not 0 then
-      set parentKey to zParent of item d of ops
-      set j to my indexOf(parentKeys, parentKey)
-      if j is 0 then
-        set end of parentKeys to parentKey
-        set end of parentCues to {}
-        set j to count of parentKeys
+-- The Safari tab with the preview page, or missing value.
+on findPage(pageTitle)
+  tell application "Safari"
+    repeat with w in windows
+      try
+        repeat with t in tabs of w
+          if name of t is pageTitle then return contents of t
+        end repeat
+      end try
+    end repeat
+  end tell
+  return missing value
+end findPage
+
+-- Waits for Apply or Cancel on the preview page. Returns the answer of the page (see QLAB_PAGE in qlab.js) with the
+-- steps, or missing value if cancelled or closed.
+on waitForPage(pageTitle)
+  set seen to false
+  set startTime to current date
+  repeat
+    delay 0.5
+    set pageTab to my findPage(pageTitle)
+    if pageTab is missing value then
+      if seen then return missing value
+      if (current date) - startTime > 30 then
+        activate
+        display dialog "The preview page didn't open in Safari." buttons {"OK"} default button 1 with icon caution
+        return missing value
       end if
-      set end of item j of parentCues to item i of oldIDs
-    end if
-  end repeat
-  repeat with j from 1 to count of parentKeys
-    set parentKey to item j of parentKeys
-    set holderID to ""
-    if parentKey is "" then
-      set holderID to theListID
     else
-      set g to item (my indexOf(wantedKeys, parentKey)) of reused
-      if g is not 0 then set holderID to item g of oldIDs
+      set seen to true
+      set answerJSON to ""
+      try
+        tell application "Safari" to set answerJSON to do JavaScript "JSON.stringify(window.zest || null)" in pageTab
+      on error e
+        activate
+        display dialog "Safari doesn't let this script read the preview page (" & e & ")." & return & return & "In Safari, open Settings > Advanced and turn on \\"Show features for web developers\\". Then turn on Develop > \\"Allow JavaScript from Apple Events\\", and click Try again." buttons {"Cancel", "Try again"} default button "Try again" cancel button "Cancel" with icon caution
+      end try
+      if answerJSON is missing value then set answerJSON to ""
+      if answerJSON starts with "{\\"state\\":\\"apply\\"" then return my fromJSON(answerJSON)
+      if answerJSON starts with "{\\"state\\":\\"cancel\\"" then return missing value
     end if
-    set wanted to item j of parentCues
-    set positions to {}
-    repeat with i from 1 to count of oldIDs
-      if item i of oldParents is holderID then
-        set w to my indexOf(wanted, item i of oldIDs)
-        if w > 0 then set end of positions to w
-      end if
-    end repeat
-    set staying to my longestRisingRun(positions)
-    repeat with w from 1 to count of wanted
-      if staying does not contain {w} then set end of planMoved to item w of wanted
-    end repeat
   end repeat
-end planUpdate
+end waitForPage
 
-set ops to {}
-%%OPS%%
+set stepsJSON to ""
+set pageJSON to ""
+%%STEPS%%
+%%PAGE%%
 
-set wantedKeys to {}
-set cueKeys to {}
-set cueIDs to {}
-set newIDs to {}
-set oldIDs to {}
-set oldKeys to {}
-set originalKeys to {}
-set oldTypes to {}
-set oldNotes to {}
-set oldParents to {}
-set oldNumbers to {}
-set oldNames to {}
-set renameFrom to {}
-set renameTo to {}
-set renameTexts to {}
-set accepted to {}
-set conflictTexts to {}
-set conflictKeys to {}
-set takeSheet to {}
+set scanned to {}
+set createdRefs to {}
+set createdIDs to {}
+set failedValues to {}
 set problems to {}
 
 tell application id "com.figure53.QLab.5"
@@ -1006,270 +1457,61 @@ tell application id "com.figure53.QLab.5"
     end if
     set current cue list to theList
     set theListID to uniqueID of theList
-    my scanCues(theList)
-    copy oldKeys to originalKeys
-    repeat with o in ops
-      set end of wantedKeys to zKey of o
-    end repeat
-
-    -- A renamed row (new cue id) looks like a removed row plus a new one. A row group the sheet doesn't have anymore
-    -- and a new one that show the same files on the same screens are offered as a rename below, unless another removed
-    -- or new row shows the same files too. They count as accepted until answered otherwise.
-    repeat with o in ops
-      if (zFiles of o) is not "" and originalKeys does not contain {zKey of o} then
-        set candidates to {}
-        repeat with i from 1 to count of oldIDs
-          set k to item i of originalKeys
-          if k is not "" and k does not contain "/" and wantedKeys does not contain {k} then
-            considering case
-              if my rememberedValue(item i of oldNotes, "files") is (zFiles of o) then set end of candidates to k
-            end considering
-          end if
-        end repeat
-        set twins to 0 -- new rows with the same files
-        repeat with o2 in ops
-          if (zFiles of o2) is (zFiles of o) and originalKeys does not contain {zKey of o2} then set twins to twins + 1
-        end repeat
-        if (count of candidates) is 1 and twins is 1 then
-          set end of renameFrom to item 1 of candidates
-          set end of renameTo to zKey of o
-          set end of accepted to count of renameFrom
-        end if
-      end if
-    end repeat
-
-    -- Work out what to change (nothing is changed yet) and show it as a preview in TextEdit, with the renames and the
-    -- values both changed as questions. The plan is made again whenever the answers change, and carried out only once
-    -- it is approved. The previews are saved next to the workspace (or on the Desktop); the last one also logs the
-    -- result.
-    repeat with r from 1 to count of renameFrom
-      set end of renameTexts to "Row " & (item r of renameFrom) & " was renamed to " & (item r of renameTo) & " (same files)"
-    end repeat
-    set previewFile to ""
-    if wsPath is missing value then
-      tell current application to set previewFolder to POSIX path of (path to desktop)
-      set previewFolder to text 1 thru -2 of previewFolder
-    else
-      tell current application to set previewFolder to do shell script "dirname " & quoted form of wsPath
-    end if
-    repeat
-      my planUpdate()
-      if rebuild then exit repeat
-      set planPreview to my previewText()
-      set questions to renameTexts & conflictTexts
-      if item 2 of planPreview is 0 and questions is {} then
-        display dialog "QLab cue list \\"" & cueListName & "\\" already matches the sheet, nothing to update." buttons {"OK"} default button 1
-        return
-      end if
-      tell current application to set stamp to do shell script "date '+%Y-%m-%d %H.%M.%S'"
-      set previewFile to previewFolder & "/" & cueListName & " update " & stamp & ".txt"
-      tell current application to do shell script "printf '%s\\\\n' " & quoted form of (item 1 of planPreview) & " > " & quoted form of previewFile & "; open -e " & quoted form of previewFile
-      activate
-      set previewMessage to "The changes are listed in TextEdit (" & previewFile & ")." & return & return & "Apply them to the QLab cue list?"
-      if questions is {} then
-        display dialog previewMessage buttons {"Cancel", "Apply"} default button "Apply" cancel button "Cancel"
-        exit repeat
-      end if
-      set clicked to button returned of (display dialog previewMessage & return & return & "The questions about renamed rows and values changed both in the sheet and in QLab, with their answers, are at the top." buttons {"Cancel", "Change choices...", "Apply"} default button "Apply" cancel button "Cancel")
-      if clicked is "Apply" then exit repeat
-
-      -- Change the answers, then make the plan and the preview again.
-      set answered to {}
-      repeat with r from 1 to count of renameTexts
-        if accepted contains {r} then set end of answered to item r of renameTexts
-      end repeat
-      repeat with q from 1 to count of conflictTexts
-        if takeSheet contains {item q of conflictKeys} then set end of answered to item q of conflictTexts
-      end repeat
-      tell current application to set picked to choose from list questions with title "Change choices" with prompt "Renamed rows (selected) keep their cues and the changes made in QLab. Unselect one to treat it as a removed row plus a new one." & return & "For values changed in the sheet and in QLab, select the ones to take from the sheet. The others keep their QLab value." default items answered OK button name "Show changes" cancel button name "Back" with multiple selections allowed and empty selection allowed
-      if picked is not false then
-        set accepted to {}
-        repeat with t in picked
-          set r to my indexOf(renameTexts, contents of t)
-          if r is not 0 then set end of accepted to r
-        end repeat
-        -- Keep the answers to values that aren't asked about now (e.g. of a row that is no longer renamed).
-        set otherAnswers to {}
-        repeat with k in takeSheet
-          if conflictKeys does not contain {contents of k} then set end of otherAnswers to contents of k
-        end repeat
-        set takeSheet to otherAnswers
-        repeat with t in picked
-          set q to my indexOf(conflictTexts, contents of t)
-          if q is not 0 then set end of takeSheet to item q of conflictKeys
-        end repeat
-      end if
-    end repeat
-
-    -- Carry out the plan.
-    repeat with r from 1 to count of duplicates
-      set end of problems to "cue " & (item (item r of duplicates) of oldNumbers) & " has the same key as another cue (copied in QLab?), so it is treated as added by hand"
-    end repeat
-
-    -- Clear the cue numbers that change first, so that no number is still taken by another cue when it is set.
-    repeat with r from 1 to count of removed
-      set i to item r of removed
-      if (item i of oldNumbers) is not "" then set q number of cue id (item i of oldIDs) to ""
-    end repeat
-    repeat with d from 1 to count of ops
-      set i to item d of reused
-      if i is not 0 then
-        considering case
-          set numberChanges to (item i of oldNumbers) is not (zNum of item d of ops)
-        end considering
-        if numberChanges then set q number of cue id (item i of oldIDs) to ""
-      end if
-    end repeat
-
-    set updated to 0
-    set kept to 0 -- cues with values changed in QLab that were kept
-    repeat with d from 1 to count of ops
-      set o to item d of ops
-      set i to item d of reused
-      set verdicts to item d of planVerdicts
-      set lasts to item d of planLast
-      if i is 0 then
-        make type (zType of o)
-        set c to last item of (selected as list)
-        set end of newIDs to uniqueID of c
-        if (zKind of o) is "fade" then set do opacity of c to true
-        set extra to ""
-        set numberChanges to true
-      else
-        set c to cue id (item i of oldIDs)
-        set extra to my extraNotes(item i of oldNotes)
-        -- A cue of a removed row (see below) whose row is back.
-        if (item i of oldNames) starts with "REMOVED " then
-          set q name of c to text 9 thru -1 of (item i of oldNames)
-          set armed of c to true
-          set q color of c to "none"
-        end if
-        considering case
-          set numberChanges to (item i of oldNumbers) is not (zNum of o)
-        end considering
-      end if
-
-      if numberChanges then
-        set q number of c to (zNum of o)
-        if q number of c is not (zNum of o) then
-          set end of problems to "cue number " & (zNum of o) & " is already used elsewhere in the workspace"
-        end if
-      end if
-
-      if (zTarget of o) is not "" then
-        set targetID to my idOfKey(zTarget of o)
-        set currentTarget to ""
-        try
-          set currentTarget to uniqueID of (cue target of c)
-        end try
-        if currentTarget is not targetID then set cue target of c to cue id targetID
-      end if
-
-      -- The values the sheet controls, as planned. The Notes remember the sheet's values (also where the QLab value
-      -- is kept, so it stays until the sheet changes again), except where they couldn't be set, so that those are
-      -- tried again next time.
-      set remembered to {}
-      set changed to false
-      set keptAny to false
-      repeat with vi from 1 to count of (zValues of o)
-        set p to item vi of (zValues of o)
-        set n to item 1 of p
-        set v to item 2 of p
-        set verdict to item vi of verdicts
-        set remember to v
-        if verdict is "set" then
-          set problem to my setValue(c, n, v)
-          if problem is not "" then
-            set end of problems to "cue " & (zNum of o) & ": " & problem
-            set remember to item vi of lasts
-          end if
-          set changed to true
-        else if verdict is "keep" then
-          set keptAny to true
-          if n is "file" and (my getValue(c, n)) is "" then set end of problems to "cue " & (zNum of o) & ": missing file " & mediaPath & "/" & v
-        end if
-        if remember is not missing value then set end of remembered to n & "=" & remember
-      end repeat
-      if (zFiles of o) is not "" then set end of remembered to "files=" & (zFiles of o)
-      if i is not 0 and changed then set updated to updated + 1
-      if keptAny then set kept to kept + 1
-      set notes of c to "zest:" & (zKey of o) & linefeed & my joinText(remembered, "|") & extra
-      set end of cueKeys to (zKey of o)
-      set end of cueIDs to (uniqueID of c)
-
-      -- A new cue goes to the end of its group, or of the cue list. placeCues sorts them below.
-      if i is 0 then
-        if (zParent of o) is "" then
-          move cue id (uniqueID of c) of parent of c to end of theList
-        else
-          move cue id (uniqueID of c) of parent of c to end of cue id (my idOfKey(zParent of o))
-        end if
-      end if
-    end repeat
-
-    -- Put the cues of each group, and of the cue list, in sheet order.
-    set containerKeys to {}
-    set containerCues to {}
-    repeat with d from 1 to count of ops
-      set parentKey to zParent of item d of ops
-      set j to my indexOf(containerKeys, parentKey)
-      if j is 0 then
-        set end of containerKeys to parentKey
-        set end of containerCues to {}
-        set j to count of containerKeys
-      end if
-      set end of item j of containerCues to (item d of cueIDs)
-    end repeat
-    repeat with j from 1 to count of containerKeys
-      if item j of containerKeys is "" then
-        set holder to theList
-      else
-        set holder to cue id (my idOfKey(item j of containerKeys))
-      end if
-      my placeCues(holder, item j of containerCues)
-    end repeat
-
-    -- The cues the sheet doesn't have anymore aren't deleted, but switched off and moved out of the way, to be deleted
-    -- by hand: disarmed, without a number (cleared above), red, named "REMOVED ...", and at the end of the cue list
-    -- (a removed group with what is inside it).
-    set removedIDs to {}
-    repeat with r from 1 to count of removed
-      set end of removedIDs to item (item r of removed) of oldIDs
-    end repeat
-    set newlyRemoved to 0
-    repeat with r from 1 to count of removed
-      set i to item r of removed
-      set c to cue id (item i of oldIDs)
-      if (item i of oldNames) does not start with "REMOVED " then
-        set q name of c to "REMOVED " & (item i of oldNames)
-        set newlyRemoved to newlyRemoved + 1
-      end if
-      set armed of c to false
-      set q color of c to "red"
-      if removedIDs does not contain {item i of oldParents} then my moveToEnd(item i of oldIDs, theList)
-    end repeat
-
-    if rebuild then
-      set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of ops) & " cues)."
-    else
-      set summary to "QLab cue list \\"" & cueListName & "\\" updated: " & (count of newIDs) & " cues created, " & updated & " updated, " & (count of planMoved) & " moved, " & (count of accepted) & " rows renamed, " & newlyRemoved & " marked as removed. " & kept & " cues keep values changed in QLab."
-      if conflictTexts is not {} then
-        set taken to 0
-        repeat with k in conflictKeys
-          if takeSheet contains {contents of k} then set taken to taken + 1
-        end repeat
-        set summary to summary & " Of " & (count of conflictTexts) & " values changed in both, " & taken & " were taken from the sheet."
-      end if
-    end if
-    if problems is not {} then set summary to summary & return & return & (count of problems) & " problem(s):" & return & return & my joinText(problems, return)
-    if previewFile is not "" then
-      tell current application to do shell script "printf '\\\\n%s\\\\n' " & quoted form of ("Applied: " & summary) & " >> " & quoted form of previewFile
-    end if
-    if problems is {} then
-      display dialog summary buttons {"OK"} default button 1
-    else
-      display dialog summary buttons {"OK"} default button 1 with icon caution
-    end if
   end tell
 end tell
+
+if rebuild then
+  my runSteps(my fromJSON(stepsJSON))
+  set summary to "QLab cue list \\"" & cueListName & "\\" generated (" & (count of createdIDs) & " cues)."
+  activate
+  if problems is {} then
+    display dialog summary buttons {"OK"} default button 1
+  else
+    display dialog summary & return & return & (count of problems) & " problem(s):" & return & return & my joinText(problems, return) buttons {"OK"} default button 1 with icon caution
+  end if
+  return
+end if
+
+-- Update: read the cue list and the media folder, show the plan in Safari, and carry it out once Apply is clicked
+-- there. The page is saved next to the workspace (or on the Desktop), and saved again with the result, as a log.
+my scanCues(theList)
+set mediaFiles to {}
+set filesKnown to false
+try
+  set mediaFiles to paragraphs of (do shell script "ls -1 " & quoted form of mediaPath)
+  set filesKnown to true
+end try
+set stamp to do shell script "date '+%Y-%m-%d %H.%M.%S'"
+set pageTitle to cueListName & " update " & stamp
+if wsPath is missing value then
+  set pageFolder to POSIX path of (path to desktop)
+  set pageFolder to text 1 thru -2 of pageFolder
+else
+  set pageFolder to do shell script "dirname " & quoted form of wsPath
+end if
+set pageFile to pageFolder & "/" & pageTitle & ".html"
+set html to item 1 of my fromJSON(pageJSON)
+set html to my replaceText(html, "%%PAGE_TITLE%%", my replaceText(my replaceText(my replaceText(pageTitle, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"))
+set html to my replaceText(html, "%%QLAB_STATE%%", my toJSON({theListID, mediaPath, filesKnown, mediaFiles, scanned}))
+my writeText(pageFile, html)
+do shell script "open -a Safari " & quoted form of pageFile
+
+set answer to my waitForPage(pageTitle)
+if answer is missing value then return
+my runSteps(|steps| of answer)
+
+-- Show the result on the page, and save it.
+try
+  set pageTab to my findPage(pageTitle)
+  tell application "Safari"
+    do JavaScript "zestDone(" & my toJSON(problems) & ")" in pageTab
+    set savedHTML to do JavaScript "'<!doctype html>\\\\n' + document.documentElement.outerHTML" in pageTab
+  end tell
+  my writeText(pageFile, savedHTML)
+on error
+  set summary to "QLab cue list \\"" & cueListName & "\\" updated."
+  if problems is not {} then set summary to summary & return & return & (count of problems) & " problem(s):" & return & return & my joinText(problems, return)
+  activate
+  display dialog summary buttons {"OK"} default button 1
+end try
 `;
