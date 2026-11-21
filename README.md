@@ -142,9 +142,9 @@ show workspace, open a script in Script Editor and press **Run**:
 - `<SHOW_NAME> update.applescript` updates that cue list in place and keeps the changes made in QLab, see
   [Updating the cue list](#updating-the-cue-list).
 
-Missing media files, unknown stage names and cue numbers already used elsewhere in the workspace are listed in a
-dialog at the end. (The script generates an AppleScript because a `.qlab5` workspace is an undocumented binary format
-with macOS file bookmarks.)
+Missing media files, unknown stage names and cue numbers already used elsewhere in the workspace are listed at the
+end (in a dialog, or on the preview page of the update script). (The script generates an AppleScript because a
+`.qlab5` workspace is an undocumented binary format with macOS file bookmarks.)
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
@@ -177,31 +177,22 @@ The update script finds the cues it generated before by their keys, so it doesn'
   as renamed, unless you choose otherwise in the preview (see below). Then its cues keep their QLab changes and get the
   new keys and numbers.
 
-Before changing anything, the script works out all changes and writes them, like a diff, to
-`<QLAB_CUE_LIST_NAME> update <date> <time>.txt` next to the workspace (or on the Desktop), opens it in TextEdit and
-asks whether to apply them. The renamed rows and the values changed in both places are listed at the top as questions,
-with their current answers. **Change choices...** lets you answer them differently and shows the changes again;
-**Cancel** leaves the cue list unchanged. After applying, the result is added to the end of the last preview, so the
-files are also a log of the updates.
+Before changing anything, the script shows all changes on a page in Safari, saved next to the workspace (or on the
+Desktop) as `<QLAB_CUE_LIST_NAME> update <date> <time>.html`. It has a section for each row that changes, with a line
+for each change:
 
 ```
-ZEST - RENT - video: 0 cues created, 1 updated, 1 moved, 0 rows renamed, 1 marked as removed. 1 cues keep values changed in QLab.
-
 + new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
-
-Questions (to change the answers, click Change choices... in the dialog)
-  ? 1. cue Q14-2 duration: 2.5 s in QLab, 3 s in the sheet: keeps the QLab value
-
-Q14
-  ~ Q14-1 file: "LOFT_A.png" -> "LOFT_B.png"
-  = Q14-2 duration: keeps 2.5 s from QLab (the sheet has 3 s)
-
-Q30
-  > Q30 moves
-
-Q40 (removed from the sheet)
-  - Q40 Window graphic: marked REMOVED
 ```
+
+The renamed rows and the values changed in both places are questions at the top; the changes below follow the answers
+right away. **Apply** makes the changes in QLab, **Cancel** (or closing the page) leaves the cue list unchanged. After
+applying, the script adds the result and any problems to the page and saves it again, so the pages are also a log of
+the updates.
+
+The script reads the page through Safari, which needs a one-time setting: in Safari's Settings > Advanced, turn on
+**Show features for web developers**, then turn on **Develop > Allow JavaScript from Apple Events**. The script says so
+if it is off.
 
 A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
 rebuild script once first.
