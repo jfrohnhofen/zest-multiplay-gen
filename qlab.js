@@ -827,6 +827,7 @@ function qlabPreviewHtml(plan, locked) {
   } else {
     const legend = [["+", "new"], ["~", "changed"], ["±", "replaced"], ["#", "renumbered"], [">", "moves"], ["-", "marked as removed"], ["^", "back from removed"], ["=", "kept from QLab"], ["!", "problem"]];
     out.push(`<p class="legend">${legend.map(([sign, text]) => `<span data-sign="${esc(sign)}"><span class="sign">${esc(sign)}</span>${text}</span>`).join("")}</p>`);
+    out.push(`<p class="rows-legend"><span style="background: var(--row-new)"></span>new row<span style="background: var(--row-changed)"></span>changed row<span style="background: var(--row-removed)"></span>removed row</p>`);
   }
   const statusText = { new: "new row", removed: "removed from the sheet", renamed: "renamed", changed: "" };
   for (const s of plan.sections) {
@@ -861,11 +862,15 @@ const QLAB_PAGE = String.raw`<!doctype html>
 :root {
   --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e3e3e8; --card: #f5f5f7;
   --add: #1a7f37; --remove: #c62828; --change: #0a66c2; --keep: #9a6700; --problem: #b35900; --accent: #0a66c2;
+  --row-new: #2da44e; --row-new-bg: #2da44e14; --row-changed: #d4a72c; --row-changed-bg: #d4a72c1f;
+  --row-removed: #cf222e; --row-removed-bg: #cf222e12;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #1c1c1e; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --card: #2c2c2e;
     --add: #3fb950; --remove: #ff6b6b; --change: #58a6ff; --keep: #d29922; --problem: #f0883e; --accent: #0a84ff;
+    --row-new: #3fb950; --row-new-bg: #3fb9501f; --row-changed: #e3b341; --row-changed-bg: #e3b3411a;
+    --row-removed: #f85149; --row-removed-bg: #f851491f;
   }
 }
 * { box-sizing: border-box; }
@@ -885,7 +890,13 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: v
 .legend { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
 .legend > span { margin-right: 14px; white-space: nowrap; }
 .legend .sign { width: 1.3em; }
-.row { border-top: 1px solid var(--line); padding: 10px 0; }
+.row { border-left: 4px solid var(--line); border-radius: 6px; padding: 10px 14px; margin: 0 0 10px; background: var(--card); }
+.row.new { border-left-color: var(--row-new); background: var(--row-new-bg); }
+.row.changed, .row.renamed { border-left-color: var(--row-changed); background: var(--row-changed-bg); }
+.row.removed { border-left-color: var(--row-removed); background: var(--row-removed-bg); }
+.rows-legend { color: var(--muted); font-size: 13px; margin: -4px 0 14px; }
+.rows-legend span { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 5px 0 12px; }
+.rows-legend span:first-child { margin-left: 0; }
 .row h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .row .id { font-family: ui-monospace, Menlo, monospace; }
 .tag { font-size: 12px; font-weight: 500; border-radius: 4px; padding: 1px 6px; margin-left: 4px; background: var(--card); color: var(--muted); }
