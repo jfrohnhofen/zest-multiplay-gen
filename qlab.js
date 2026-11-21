@@ -860,18 +860,11 @@ const QLAB_PAGE = String.raw`<!doctype html>
 <title>%%PAGE_TITLE%%</title>
 <style>
 :root {
-  --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e3e3e8; --card: #f5f5f7;
-  --add: #1a7f37; --remove: #c62828; --change: #0a66c2; --keep: #9a6700; --problem: #b35900; --accent: #0a66c2;
-  --row-new: #2da44e; --row-new-bg: #2da44e14; --row-changed: #d4a72c; --row-changed-bg: #d4a72c1f;
-  --row-removed: #cf222e; --row-removed-bg: #cf222e12;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c1c1e; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --card: #2c2c2e;
-    --add: #3fb950; --remove: #ff6b6b; --change: #58a6ff; --keep: #d29922; --problem: #f0883e; --accent: #0a84ff;
-    --row-new: #3fb950; --row-new-bg: #3fb9501f; --row-changed: #e3b341; --row-changed-bg: #e3b3411a;
-    --row-removed: #f85149; --row-removed-bg: #f851491f;
-  }
+  color-scheme: dark; /* always dark, like QLab */
+  --bg: #1c1c1e; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --card: #2c2c2e;
+  --add: #3fb950; --remove: #ff6b6b; --change: #58a6ff; --keep: #d29922; --problem: #f0883e; --accent: #0a84ff;
+  --row-new: #3fb950; --row-new-bg: #3fb9501f; --row-changed: #e3b341; --row-changed-bg: #e3b3411a;
+  --row-removed: #f85149; --row-removed-bg: #f851491f;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }

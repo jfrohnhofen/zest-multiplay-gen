@@ -182,7 +182,7 @@ Desktop) as `<QLAB_CUE_LIST_NAME> update <date> <time>.html`. It has a section f
 for each change. A new row, a row removed from the sheet, and a row renumbered with all its cues (e.g. renamed) are a
 single line, as are the cue names that only change with a new file and a cue replaced by a new one (e.g. a fade-out of
 other media); the details are one click away. The rows are in sheet order, green when new, yellow when changed and red
-when removed from the sheet.
+when removed from the sheet. The page is always dark, like QLab.
 
 ```
 + new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
