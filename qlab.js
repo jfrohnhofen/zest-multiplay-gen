@@ -535,12 +535,12 @@ function qlabPlan(sheet, qlab, answers) {
   const files = qlab.files == null ? null : new Set(qlab.files.map(f => String(f).normalize("NFC")));
   const missingFile = name => files != null && !files.has(String(name).normalize("NFC"));
   const sections = new Map(); // lower-case row id -> { row, lines }
-  const lineIn = (key, sign, text, renumber, change) => {
+  const lineIn = (key, sign, text, about = {}) => {
     const row = key.split("/")[0];
     if (!sections.has(lower(row))) {
       sections.set(lower(row), { row, lines: [] });
     }
-    sections.get(lower(row)).lines.push({ sign, text, key, renumber, change });
+    sections.get(lower(row)).lines.push({ sign, text, key, ...about });
   };
   const counts = { created: 0, updated: 0, moved: moved.size, renamed: renames.filter(r => r.accepted).length, removed: 0, kept: 0 };
 
@@ -549,7 +549,7 @@ function qlabPlan(sheet, qlab, answers) {
     const ref = refOf(d);
     if (!c) {
       steps.push(["create", ref, o.type, holderOf(o.parent)]);
-      lineIn(o.key, "+", `${o.number} ${o.values[0][1]} (new ${o.kind})`);
+      lineIn(o.key, "+", `${o.number} ${o.values[0][1]} (new ${o.kind})`, { cue: { key: o.key, type: o.type, number: o.number, name: o.values[0][1] } });
       counts.created++;
     } else {
       if (c.name.startsWith("REMOVED ")) {
@@ -557,7 +557,7 @@ function qlabPlan(sheet, qlab, answers) {
         lineIn(o.key, "^", `${o.number} comes back (it was marked REMOVED)`);
       }
       if (numberChanges(d)) {
-        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`, [c.number, o.number]);
+        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`, { renumber: [c.number, o.number] });
       }
       if (moved.has(c.id)) {
         lineIn(o.key, ">", `${o.number} moves`);
@@ -583,7 +583,7 @@ function qlabPlan(sheet, qlab, answers) {
       if (verdict === "set") {
         steps.push(["set", ref, name, value, o.number]);
         if (c) {
-          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`, null, [name, qlabValue, value]);
+          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`, { change: [name, qlabValue, value] });
           anySet = true;
         }
         if (name === "file" && missingFile(value)) {
@@ -628,7 +628,7 @@ function qlabPlan(sheet, qlab, answers) {
     const already = c.name.startsWith("REMOVED ");
     steps.push(["remove", c.id, already ? "" : `REMOVED ${c.name}`, removedIDs.includes(c.parent) ? "no" : "yes"]);
     if (!already) {
-      lineIn(oldKeys[i], "-", `${c.number || "(no number)"} ${c.name}: marked REMOVED`);
+      lineIn(oldKeys[i], "-", `${c.number || "(no number)"} ${c.name}: marked REMOVED`, { cue: { key: oldKeys[i], type: c.type, number: c.number, name: c.name } });
       counts.removed++;
     }
   }
@@ -655,8 +655,9 @@ function qlabPlan(sheet, qlab, answers) {
 /**
  * The lines of a section of the preview (see qlabPlan) in short: a new row or a row removed from the sheet is one line,
  * and so is a row whose number changed together with the numbers of the cues in it (e.g. after a rename). Cue names
- * that only change because they name a new file (fileChanges: [old file, new file] pairs) are counted in one line.
- * Problems are always shown.
+ * that only change because they name a new file (fileChanges: [old file, new file] pairs) are counted in one line. A
+ * cue marked as removed and a new one of the same type with the same number or name (e.g. a fade-out of other media)
+ * are one line too. Problems are always shown.
  */
 function qlabSummaryLines(section, fileChanges) {
   const lines = section.lines;
@@ -675,8 +676,28 @@ function qlabSummaryLines(section, fileChanges) {
   const followsFile = l => l.change?.[0] === "name" && fileChanges.some(([a, b]) => l.change[1].includes(a) && l.change[1].split(a).join(b) === l.change[2]);
   const renumbered = lines.filter(followsRow).length;
   const renamed = lines.filter(followsFile).length;
-  const summary = lines.filter(l => !followsRow(l) && !followsFile(l)).map(l => l !== row ? l
-    : { sign: "#", text: `${from || "(no number)"} → ${to}` + (renumbered ? `, and the ${renumbered} cues in it` : "") });
+
+  // The new cues that replace a removed one.
+  const replacing = new Map(); // "+" line -> its "-" line
+  for (const added of lines.filter(l => l.sign === "+" && l.cue)) {
+    const gone = lines.find(l => l.sign === "-" && l.cue && l.cue.type === added.cue.type && ![...replacing.values()].includes(l)
+      && (l.cue.number === added.cue.number || l.cue.name === added.cue.name));
+    if (gone) {
+      replacing.set(added, gone);
+    }
+  }
+  const targetOf = key => key.includes(":") ? key.slice(key.indexOf(":") + 1).replace("/", " ") : "";
+  const replaced = (added, gone) => {
+    const { cue: a } = added, { cue: g } = gone;
+    const change = g.name !== a.name ? `${g.name} → ${a.name}` : `${a.name}: target ${targetOf(g.key)} → ${targetOf(a.key)}`;
+    return { sign: "±", text: `${a.number} ${change} (replaced)` };
+  };
+
+  const replacedCues = [...replacing.values()];
+  const summary = lines.filter(l => !followsRow(l) && !followsFile(l) && !replacedCues.includes(l)).map(l =>
+    replacing.has(l) ? replaced(l, replacing.get(l))
+      : l !== row ? l
+        : { sign: "#", text: `${from || "(no number)"} → ${to}` + (renumbered ? `, and the ${renumbered} cues in it` : "") });
   if (renamed) {
     summary.push({ sign: "~", text: renamed === 1 ? "1 cue name follows the new file name" : `${renamed} cue names follow the new file names` });
   }
@@ -786,7 +807,7 @@ function qlabPreviewHtml(plan, locked) {
   if (plan.sections.length === 0) {
     out.push(`<p class="none">The cue list already matches the sheet.</p>`);
   } else {
-    const legend = [["+", "new"], ["~", "changed"], ["#", "renumbered"], [">", "moves"], ["-", "marked as removed"], ["^", "back from removed"], ["=", "kept from QLab"], ["!", "problem"]];
+    const legend = [["+", "new"], ["~", "changed"], ["±", "replaced"], ["#", "renumbered"], [">", "moves"], ["-", "marked as removed"], ["^", "back from removed"], ["=", "kept from QLab"], ["!", "problem"]];
     out.push(`<p class="legend">${legend.map(([sign, text]) => `<span data-sign="${esc(sign)}"><span class="sign">${esc(sign)}</span>${text}</span>`).join("")}</p>`);
   }
   const statusText = { new: "new row", removed: "removed from the sheet", renamed: "renamed", changed: "" };
@@ -857,7 +878,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: v
 .sign { display: inline-block; width: 1.8em; text-indent: 0; font-weight: 700; }
 [data-sign="+"] .sign, [data-sign="^"] .sign { color: var(--add); }
 [data-sign="-"] .sign { color: var(--remove); }
-[data-sign="~"] .sign, [data-sign="#"] .sign, [data-sign=">"] .sign { color: var(--change); }
+[data-sign="~"] .sign, [data-sign="±"] .sign, [data-sign="#"] .sign, [data-sign=">"] .sign { color: var(--change); }
 [data-sign="="] .sign { color: var(--keep); }
 [data-sign="!"] { color: var(--problem); }
 details { margin: 4px 0 0 1.8em; }
