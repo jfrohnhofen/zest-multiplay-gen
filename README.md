@@ -179,7 +179,8 @@ The update script finds the cues it generated before by their keys, so it doesn'
 
 Before changing anything, the script shows all changes on a page in Safari, saved next to the workspace (or on the
 Desktop) as `<QLAB_CUE_LIST_NAME> update <date> <time>.html`. It has a section for each row that changes, with a line
-for each change:
+for each change. A new row, a row removed from the sheet, and a row renumbered with all its cues (e.g. renamed) are a
+single line, as are the cue names that only change with a new file; the details are one click away.
 
 ```
 + new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem

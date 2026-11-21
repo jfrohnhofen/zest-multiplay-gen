@@ -133,7 +133,7 @@ function qlabSheetCues(ops) {
  * The script fills in the cue list as it is when it runs.
  */
 function qlabPage(sheet) {
-  const code = [qlabPlan, qlabDecide, qlabRenamedKey, qlabLongestRisingRun, qlabShownValue, qlabPreviewHtml, qlabEscape]
+  const code = [qlabPlan, qlabSummaryLines, qlabDecide, qlabRenamedKey, qlabLongestRisingRun, qlabShownValue, qlabPreviewHtml, qlabEscape]
     .map(String).join("\n\n");
   assert(!/<\/script/i.test(code), "the planning code can't contain </script>");
   const fill = {
@@ -396,7 +396,8 @@ const QLAB_CUE_TYPES = { group: "Group", video: "Video", camera: "Camera", fade:
  * Returns:
  * - renames: the rows that look renamed, { id, from, to, accepted }.
  * - conflicts: the values both changed, { id, number, name, qlab, sheet, takeSheet }.
- * - sections: the preview (see qlabPreviewHtml), a section for each row with changes.
+ * - sections: the preview (see qlabPreviewHtml), a section for each row with changes, with a line for each change
+ *   and a shorter summary of them (see qlabSummaryLines).
  * - unchanged: the number of rows without changes; changes: the number of changes; counts.
  * - steps: what the script does to carry it out (see runSteps in QLAB_SCRIPT_TEMPLATE), lists of text:
  *     clearNumber <cue>                        clear its number (so it isn't taken when set again)
@@ -534,12 +535,12 @@ function qlabPlan(sheet, qlab, answers) {
   const files = qlab.files == null ? null : new Set(qlab.files.map(f => String(f).normalize("NFC")));
   const missingFile = name => files != null && !files.has(String(name).normalize("NFC"));
   const sections = new Map(); // lower-case row id -> { row, lines }
-  const lineIn = (key, sign, text) => {
+  const lineIn = (key, sign, text, renumber, change) => {
     const row = key.split("/")[0];
     if (!sections.has(lower(row))) {
       sections.set(lower(row), { row, lines: [] });
     }
-    sections.get(lower(row)).lines.push({ sign, text });
+    sections.get(lower(row)).lines.push({ sign, text, key, renumber, change });
   };
   const counts = { created: 0, updated: 0, moved: moved.size, renamed: renames.filter(r => r.accepted).length, removed: 0, kept: 0 };
 
@@ -556,7 +557,7 @@ function qlabPlan(sheet, qlab, answers) {
         lineIn(o.key, "^", `${o.number} comes back (it was marked REMOVED)`);
       }
       if (numberChanges(d)) {
-        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`);
+        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`, [c.number, o.number]);
       }
       if (moved.has(c.id)) {
         lineIn(o.key, ">", `${o.number} moves`);
@@ -582,7 +583,7 @@ function qlabPlan(sheet, qlab, answers) {
       if (verdict === "set") {
         steps.push(["set", ref, name, value, o.number]);
         if (c) {
-          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`);
+          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`, null, [name, qlabValue, value]);
           anySet = true;
         }
         if (name === "file" && missingFile(value)) {
@@ -635,7 +636,8 @@ function qlabPlan(sheet, qlab, answers) {
     lineIn(oldKeys[i], "!", `${cues[i].number || "(no number)"} has the same key as another cue (copied in QLab?), so it is treated as added by hand`);
   }
 
-  // The headers of the sections.
+  // The headers of the sections, and their lines in short. A new file also changes the names of the cues that show it.
+  const fileChanges = [...sections.values()].flatMap(s => s.lines).filter(l => l.change?.[0] === "file" && l.change[1]).map(l => l.change.slice(1));
   const groups = new Set(sheet.filter(o => o.parent === "").map(o => lower(o.key)));
   for (const s of sections.values()) {
     const d = indexOfKey(s.row);
@@ -643,10 +645,42 @@ function qlabPlan(sheet, qlab, answers) {
     s.status = rename ? "renamed" : d < 0 ? "removed" : reused[d] < 0 ? "new" : "changed";
     s.header = rename ? `${rename.from} → ${s.row}` : s.row;
     s.title = d >= 0 ? sheet[d].values[0][1] : (cues.find(c => lower(c.key) === lower(s.row))?.name ?? "").replace(/^REMOVED /, "");
+    s.summary = qlabSummaryLines(s, fileChanges);
   }
   const changes = [...sections.values()].reduce((n, s) => n + s.lines.filter(l => l.sign !== "=" && l.sign !== "!").length, 0);
   const unchanged = [...groups].filter(row => !sections.has(row)).length;
   return { renames, conflicts, sections: [...sections.values()], unchanged, changes, counts, steps };
+}
+
+/**
+ * The lines of a section of the preview (see qlabPlan) in short: a new row or a row removed from the sheet is one line,
+ * and so is a row whose number changed together with the numbers of the cues in it (e.g. after a rename). Cue names
+ * that only change because they name a new file (fileChanges: [old file, new file] pairs) are counted in one line.
+ * Problems are always shown.
+ */
+function qlabSummaryLines(section, fileChanges) {
+  const lines = section.lines;
+  const problems = lines.filter(l => l.sign === "!");
+  const count = sign => lines.filter(l => l.sign === sign).length;
+  if (section.status === "new" && count("+") + problems.length === lines.length) {
+    return [{ sign: "+", text: `new row, ${count("+")} cues` }, ...problems];
+  }
+  if (section.status === "removed" && count("-") + problems.length === lines.length) {
+    return [{ sign: "-", text: `${count("-")} cues marked REMOVED` }, ...problems];
+  }
+
+  const row = lines.find(l => l.renumber && !l.key.includes("/"));
+  const [from, to] = row ? row.renumber : [];
+  const followsRow = l => row && l !== row && l.renumber && l.renumber[0].startsWith(from) && l.renumber[1] === to + l.renumber[0].slice(from.length);
+  const followsFile = l => l.change?.[0] === "name" && fileChanges.some(([a, b]) => l.change[1].includes(a) && l.change[1].split(a).join(b) === l.change[2]);
+  const renumbered = lines.filter(followsRow).length;
+  const renamed = lines.filter(followsFile).length;
+  const summary = lines.filter(l => !followsRow(l) && !followsFile(l)).map(l => l !== row ? l
+    : { sign: "#", text: `${from || "(no number)"} → ${to}` + (renumbered ? `, and the ${renumbered} cues in it` : "") });
+  if (renamed) {
+    summary.push({ sign: "~", text: renamed === 1 ? "1 cue name follows the new file name" : `${renamed} cue names follow the new file names` });
+  }
+  return summary;
 }
 
 /**
@@ -758,8 +792,10 @@ function qlabPreviewHtml(plan, locked) {
   const statusText = { new: "new row", removed: "removed from the sheet", renamed: "renamed", changed: "" };
   for (const s of plan.sections) {
     out.push(`<div class="row ${s.status}"><h3><span class="id">${esc(s.header)}</span> ${esc(s.title)}${statusText[s.status] ? ` <span class="tag">${statusText[s.status]}</span>` : ""}</h3>`);
-    for (const l of s.lines) {
-      out.push(`<div class="line" data-sign="${esc(l.sign)}"><span class="sign">${esc(l.sign)}</span>${esc(l.text)}</div>`);
+    const line = l => `<div class="line" data-sign="${esc(l.sign)}"><span class="sign">${esc(l.sign)}</span>${esc(l.text)}</div>`;
+    out.push(...s.summary.map(line));
+    if (s.summary.length !== s.lines.length || s.summary.some((l, i) => l !== s.lines[i])) {
+      out.push(`<details><summary>${s.lines.length === 1 ? "The change" : `All ${s.lines.length} changes`}</summary>`, ...s.lines.map(line), `</details>`);
     }
     out.push(`</div>`);
   }
@@ -824,6 +860,8 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: v
 [data-sign="~"] .sign, [data-sign="#"] .sign, [data-sign=">"] .sign { color: var(--change); }
 [data-sign="="] .sign { color: var(--keep); }
 [data-sign="!"] { color: var(--problem); }
+details { margin: 4px 0 0 1.8em; }
+details summary { color: var(--muted); font-size: 13px; cursor: pointer; }
 .none, .unchanged { color: var(--muted); }
 .result { border-radius: 6px; padding: 10px 14px; margin: 0 0 26px; background: var(--card); border-left: 3px solid var(--add); }
 .result.problems { border-left-color: var(--problem); }
