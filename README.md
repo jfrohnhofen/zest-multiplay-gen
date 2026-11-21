@@ -21,6 +21,8 @@ An automated Google Apps Script project for theatre productions that parses mast
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
   - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`.
   - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
+  - An update script that changes the existing cue list in place and keeps the changes made in QLab, after showing a
+    preview of the changes to approve (see [Updating the cue list](#updating-the-cue-list)).
 - **Asset Bundler**: Automatically creates Google Drive shortcuts for all referenced media files inside track-specific subfolders (`sound`, `video`, etc.) in the designated output folder. Files from all video screens are collected in one `video` folder.
 - **Custom Google Sheets UI**: Adds a custom **ZEST** menu item directly to the spreadsheet toolbar for easy execution.
 
@@ -133,16 +135,76 @@ cue number.
 
 ## QLab Video Cues
 
-**ZEST > Generate QLab script** writes `<SHOW_NAME>.applescript` to the output folder. Copy it to the QLab Mac,
-open the show workspace, open the script in Script Editor and press **Run**. It deletes the cue list named
-`QLAB_CUE_LIST_NAME` and rebuilds it, so re-run it whenever the sheet changes. Missing media files, unknown stage
-names and cue numbers already used elsewhere in the workspace are listed in a dialog at the end. (The script
-generates an AppleScript because a `.qlab5` workspace is an undocumented binary format with macOS file bookmarks.)
+**ZEST > Generate QLab script** writes two AppleScripts to the output folder. Copy them to the QLab Mac, open the
+show workspace, open a script in Script Editor and press **Run**:
+
+- `<SHOW_NAME>.applescript` deletes the cue list named `QLAB_CUE_LIST_NAME` and rebuilds it from the sheet.
+- `<SHOW_NAME> update.applescript` updates that cue list in place and keeps the changes made in QLab, see
+  [Updating the cue list](#updating-the-cue-list).
+
+Missing media files, unknown stage names and cue numbers already used elsewhere in the workspace are listed in a
+dialog at the end. (The script generates an AppleScript because a `.qlab5` workspace is an undocumented binary format
+with macOS file bookmarks.)
 
 Each screen has its own column pair, `<Screen>\nFile` and `<Screen>\nParams`, configured in `QLAB_SCREENS`
 (e.g. `SL screen`, `SR screen`, `Projector`). Each row with video becomes a QLab group with the sheet's cue number,
 which MultiPlay starts via OSC `/cue/<X>/start` (after the row's pre-wait, see [Cue Triggers](#cue-triggers)). Inside, numbered `<X>-1`, `<X>-2`, … (so tech inserts like `<X>.5` never collide): the new media, a fade-in,
 and fade-and-stop cues for whatever it replaces on that screen.
+
+The first line of each generated cue's Notes is a key like `zest:Q12/Window/media`. It says what the cue does for
+the sheet, independently of its cue number. The second line remembers the values the sheet set, like
+`name=Window: a.mp4|file=a.mp4|opacity=0|…` (times and opacities in thousandths). Don't edit these two lines in QLab.
+
+### Updating the cue list
+
+The update script finds the cues it generated before by their keys, so it doesn't depend on cue numbers:
+
+- **The sheet controls** each cue's name, file, stage, opacity, loop, layer, fade duration, stop-when-done, pre-wait
+  and continue mode, and the cue numbers, targets and order.
+- **The second line of the Notes remembers the sheet's values from the last run.** That tells the script who changed
+  a value since then:
+  - Only the sheet changed it: the script sets the sheet's value.
+  - Only QLab changed it: the script keeps the QLab value, until the sheet changes it again.
+  - Both changed it: the script keeps the QLab value, unless you choose the sheet's in the preview (see below).
+- **QLab controls everything else**, e.g. geometry, effects, levels, colours and notes below the first two lines.
+  Cues without a key (added by hand) are left alone, and stay right after the cue they follow.
+- **New rows** get new cues. **Removed rows** keep their cues, but switched off for you to delete: disarmed, without
+  a number, red, named `REMOVED …`, and moved to the end of the cue list. If the row comes back, so do its cues. A cue
+  whose type changes (e.g. a video that becomes `@camera`) is replaced, and the old one marked as removed.
+- **Moved rows** keep their keys, so their cues keep their QLab changes and move to the row's new place.
+- **Renamed rows** (a new cue id) get new keys, so they would look like a removed row plus a new one. If a removed row
+  and a new row show the same files on the same screens (and no other removed or new row does), the script treats it
+  as renamed, unless you choose otherwise in the preview (see below). Then its cues keep their QLab changes and get the
+  new keys and numbers.
+
+Before changing anything, the script works out all changes and writes them, like a diff, to
+`<QLAB_CUE_LIST_NAME> update <date> <time>.txt` next to the workspace (or on the Desktop), opens it in TextEdit and
+asks whether to apply them. The renamed rows and the values changed in both places are listed at the top as questions,
+with their current answers. **Change choices...** lets you answer them differently and shows the changes again;
+**Cancel** leaves the cue list unchanged. After applying, the result is added to the end of the last preview, so the
+files are also a log of the updates.
+
+```
+ZEST - RENT - video: 0 cues created, 1 updated, 1 moved, 0 rows renamed, 1 marked as removed. 1 cues keep values changed in QLab.
+
++ new   ~ changed   # renumbered   > moves   - marked as removed   ^ back from removed   = kept from QLab   ! problem
+
+Questions (to change the answers, click Change choices... in the dialog)
+  ? 1. cue Q14-2 duration: 2.5 s in QLab, 3 s in the sheet: keeps the QLab value
+
+Q14
+  ~ Q14-1 file: "LOFT_A.png" -> "LOFT_B.png"
+  = Q14-2 duration: keeps 2.5 s from QLab (the sheet has 3 s)
+
+Q30
+  > Q30 moves
+
+Q40 (removed from the sheet)
+  - Q40 Window graphic: marked REMOVED
+```
+
+A workspace built before keys existed has none, so the update script would add a second copy of every cue. Run the
+rebuild script once first.
 
 ### File column
 
@@ -176,7 +238,7 @@ Production settings are managed in [main.js](main.js):
 - **Placeholders**: `MULTIPLAY_OUTPUT_LX_PLACEHOLDER_CUES` / `MULTIPLAY_OUTPUT_VX_PLACEHOLDER_CUES` add an LX / VX cue to every row, even without lighting / video content.
 - **QLab**:
   - `QLAB_SCREENS`: Video screens, keyed by the lower-case first header line of their columns. `stage` is the QLab stage name, `label` a short name used in cue names (e.g. `{ "sl screen": { stage: "SL", label: "SL" } }`).
-  - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list (replaced on every run).
+  - `QLAB_CUE_LIST_NAME`: Name of the generated QLab cue list.
   - `QLAB_MEDIA_FOLDER`: Media folder on the QLab Mac, relative to the workspace file or absolute (default `video`).
   - `QLAB_DEFAULT_FADE`: Default fade-in / crossfade time in seconds.
 
@@ -261,7 +323,7 @@ clasp push
 1. Open the connected Google Sheet.
 2. Click the **ZEST** menu item in the spreadsheet menu bar:
    - **Generate MultiPlay file**: Parses the sheet and writes `<SHOW_NAME>.mpp` to Google Drive.
-   - **Generate QLab script**: Writes `<SHOW_NAME>.applescript`, which builds the QLab video cue list (see above).
+   - **Generate QLab script**: Writes `<SHOW_NAME>.applescript` and `<SHOW_NAME> update.applescript`, which build or update the QLab video cue list (see above).
    - **Bundle assets**: Organizes shortcuts to drive files into `sound/`, `video/`, etc. subfolders.
    - **Everything Everywhere All at Once**: Generates the MultiPlay file and the QLab script, and bundles assets.
 
