@@ -649,7 +649,25 @@ function qlabPlan(sheet, qlab, answers) {
   }
   const changes = [...sections.values()].reduce((n, s) => n + s.lines.filter(l => l.sign !== "=" && l.sign !== "!").length, 0);
   const unchanged = [...groups].filter(row => !sections.has(row)).length;
-  return { renames, conflicts, sections: [...sections.values()], unchanged, changes, counts, steps };
+
+  // The sections in sheet order. A row removed from the sheet goes where it was in the cue list: after the row of the
+  // closest cue before it that is still in the sheet.
+  const rowOfKey = k => lower(k.split("/")[0]);
+  const positionOf = s => {
+    const d = indexOfKey(s.row);
+    if (d >= 0) {
+      return d;
+    }
+    const first = oldKeys.findIndex(k => k && rowOfKey(k) === lower(s.row));
+    for (let i = first - 1; i >= 0; i--) {
+      if (oldKeys[i] && indexOfKey(rowOfKey(oldKeys[i])) >= 0) {
+        return indexOfKey(rowOfKey(oldKeys[i])) + 0.5;
+      }
+    }
+    return -0.5;
+  };
+  const ordered = [...sections.values()].map(s => [positionOf(s), s]).sort((a, b) => a[0] - b[0]).map(([, s]) => s);
+  return { renames, conflicts, sections: ordered, unchanged, changes, counts, steps };
 }
 
 /**
