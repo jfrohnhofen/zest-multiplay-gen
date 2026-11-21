@@ -492,6 +492,11 @@ function qlabPlan(sheet, qlab, answers) {
     }
     const qlabValue = c.values.get(name) ?? "";
     const last = c.remembered.get(name) ?? null;
+    // A video whose file is gone (e.g. after the media folder was replaced by a new export) has no file in QLab. That
+    // isn't a change made in QLab, so the sheet's file is set (again), without a question.
+    if (name === "file" && qlabValue === "") {
+      return { verdict: "set", qlab: qlabValue, last, missing: true };
+    }
     let verdict = qlabDecide(qlabValue, value, last);
     if (verdict === "conflict") {
       const id = `${o.key}#${name}`;
@@ -579,10 +584,16 @@ function qlabPlan(sheet, qlab, answers) {
     let anySet = false;
     let anyKept = false;
     o.values.forEach(([name, value], vi) => {
-      const { verdict, qlab: qlabValue, last } = verdicts[d][vi];
+      const { verdict, qlab: qlabValue, last, missing } = verdicts[d][vi];
       if (verdict === "set") {
         steps.push(["set", ref, name, value, o.number]);
-        if (c) {
+        if (c && missing) {
+          // The old file is named after the one the sheet set last time (see sheetValues).
+          lineIn(o.key, "~", last == null || last === value
+            ? `${o.number} ${name}: ${qlabShownValue(name, value)} is missing in QLab, set again`
+            : `${o.number} ${name}: ${qlabShownValue(name, last)} (missing in QLab) → ${qlabShownValue(name, value)}`, { change: [name, last ?? "", value] });
+          anySet = true;
+        } else if (c) {
           lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`, { change: [name, qlabValue, value] });
           anySet = true;
         }
@@ -593,9 +604,6 @@ function qlabPlan(sheet, qlab, answers) {
         anyKept = true;
         if (conflicts.some(q => q.id === `${o.key}#${name}`)) {
           lineIn(o.key, "=", `${o.number} ${name}: keeps ${qlabShownValue(name, qlabValue)} from QLab (the sheet has ${qlabShownValue(name, value)})`);
-        }
-        if (name === "file" && qlabValue === "") {
-          lineIn(o.key, "!", `${o.number} has no file in QLab (the sheet has ${qlabShownValue(name, value)})`);
         }
       }
       remember.push([name, value, verdict === "set" ? last : value]);
