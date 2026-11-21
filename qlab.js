@@ -336,6 +336,344 @@ function sheetValues(op) {
 // The QLab cue type of each op.
 const QLAB_CUE_TYPES = { group: "Group", video: "Video", camera: "Camera", fade: "Fade", stop: "Stop", pause: "Pause", resume: "Start" };
 
+/**
+ * Works out how to bring the QLab cue list in line with the sheet, without changing anything yet.
+ *
+ * - sheet: the cues of the sheet, { key, kind (op), type (QLab cue type), parent (key, "" for the cue list), number,
+ *   target (key or ""), files (see generateQlab), values (see sheetValues) }.
+ * - qlab: the cue list as it is: { listID, mediaPath, files (the names in the media folder, or null if unknown), cues:
+ *   [{ id (uniqueID), type, parent (uniqueID), number, name, notes, target (uniqueID or ""), values ([name, value]
+ *   pairs, of a cue with a key) }] }. For a rebuild, it has no cues.
+ * - answers: { notRenamed: the renames answered "no", takeSheet: the conflicts answered "take the sheet's value" }
+ *   (by id).
+ *
+ * Every cue the sheet had before has the key of what it does for the sheet in the first line of its Notes, and the
+ * sheet's values of last time in the second line (see sheetValues). A cue of the sheet reuses the cue with its key,
+ * and only its values the sheet changed since last time are set (see qlabDecide). Cues the sheet doesn't have anymore
+ * are marked as removed. Cues without a key (added by hand) aren't changed.
+ *
+ * Returns:
+ * - renames: the rows that look renamed, { id, from, to, accepted }.
+ * - conflicts: the values both changed, { id, number, name, qlab, sheet, takeSheet }.
+ * - sections: the preview, a section for each row with changes, { row, header, title, status, lines }.
+ * - unchanged: the number of rows without changes; changes: the number of changes; counts.
+ * - steps: what the script has to do to carry it out, lists of text:
+ *     clearNumber <cue>                        clear its number (so it isn't taken when set again)
+ *     create <cue> <type> <holder>             make a cue at the end of a group or the cue list
+ *     restore <cue> <name>                     unmark a removed cue: name, armed, no color
+ *     number <cue> <number>
+ *     target <cue> <target cue>
+ *     set <cue> <value name> <value> <number>  set a value, the number is for problems
+ *     notes <cue> <key> <values> <extra>       write the Notes: the key, the values to remember ([name, value, value
+ *                                              if it couldn't be set (null: none)]) and the lines added in QLab
+ *     place <holder> <cues>                    put the cues in this order (see placeCues in QLAB_SCRIPT_TEMPLATE)
+ *     remove <cue> <new name or ""> <yes/no>   mark a cue as removed, and move it to the end of the cue list (yes)
+ *   A <cue> is a uniqueID, "new:<key>" for a cue created by an earlier step, or "list" for the cue list.
+ *
+ * This is planUpdate (and the preview) of QLAB_SCRIPT_TEMPLATE in JavaScript, to run it in a preview page instead. It
+ * will run in the page, so it can only use the functions built into the page.
+ */
+function qlabPlan(sheet, qlab, answers) {
+  const lower = s => String(s).toLowerCase();
+  const notRenamed = answers.notRenamed || [];
+  const takeSheet = answers.takeSheet || [];
+
+  // The cues in QLab, with their key and the sheet's values of last time from the Notes.
+  const cues = qlab.cues.map(c => {
+    const notes = String(c.notes ?? "").split(/\r\n|\r|\n/);
+    const remembered = new Map();
+    for (const pair of (notes[1] ?? "").split("|")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0 && !remembered.has(pair.slice(0, eq))) {
+        remembered.set(pair.slice(0, eq), pair.slice(eq + 1));
+      }
+    }
+    return {
+      ...c,
+      number: String(c.number ?? ""),
+      name: String(c.name ?? ""),
+      key: notes[0].startsWith("zest:") ? notes[0].slice(5) : "",
+      values: new Map(c.values ?? []),
+      remembered,
+      extra: notes.length > 2 ? "\n" + notes.slice(2).join("\n") : "", // lines added in QLab
+    };
+  });
+
+  // Keys are matched ignoring case, like cue ids (q12 and Q12 are the same row).
+  const sheetIndex = new Map(sheet.map((o, d) => [lower(o.key), d]));
+  const indexOfKey = k => sheetIndex.get(lower(k)) ?? -1;
+  const originalKeys = new Set(cues.filter(c => c.key).map(c => lower(c.key)));
+
+  // A renamed row (new cue id) looks like a removed row plus a new one. A row group the sheet doesn't have anymore and
+  // a new one that show the same files on the same screens are a rename, unless another removed or new row shows the
+  // same files too, or it is answered otherwise.
+  const renames = [];
+  for (const o of sheet) {
+    if (!o.files || originalKeys.has(lower(o.key))) {
+      continue;
+    }
+    const candidates = cues.filter(c => c.key && !c.key.includes("/") && indexOfKey(c.key) < 0 && c.remembered.get("files") === o.files);
+    const twins = sheet.filter(o2 => o2.files === o.files && !originalKeys.has(lower(o2.key)));
+    if (candidates.length === 1 && twins.length === 1) {
+      const id = `${candidates[0].key}>${o.key}`;
+      renames.push({ id, from: candidates[0].key, to: o.key, accepted: !notRenamed.includes(id) });
+    }
+  }
+  const oldKeys = cues.map(c => renames.filter(r => r.accepted).reduce((k, r) => qlabRenamedKey(k, r.from, r.to), c.key));
+
+  // Which existing cue each cue of the sheet reuses (-1: none). A cue is reused only if it still has the same type (e.g.
+  // a video that becomes a camera is replaced). The others with a key are removed, or copies made in QLab.
+  const reused = sheet.map(() => -1);
+  const removed = [];
+  const duplicates = [];
+  oldKeys.forEach((k, i) => {
+    if (!k) {
+      return;
+    }
+    const d = indexOfKey(k);
+    if (d < 0 || cues[i].type !== sheet[d].type) {
+      removed.push(i);
+    } else if (reused[d] >= 0) {
+      duplicates.push(i);
+    } else {
+      reused[d] = i;
+    }
+  });
+  const refOf = d => reused[d] >= 0 ? cues[reused[d]].id : `new:${sheet[d].key}`;
+  const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
+
+  // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
+  const conflicts = [];
+  const verdicts = sheet.map((o, d) => o.values.map(([name, value]) => {
+    const c = cues[reused[d]];
+    if (!c) {
+      return { verdict: "set", qlab: null, last: null };
+    }
+    const qlabValue = c.values.get(name) ?? "";
+    const last = c.remembered.get(name) ?? null;
+    let verdict = qlabDecide(qlabValue, value, last);
+    if (verdict === "conflict") {
+      const id = `${o.key}#${name}`;
+      conflicts.push({ id, number: o.number, name, qlab: qlabValue, sheet: value, takeSheet: takeSheet.includes(id) });
+      verdict = takeSheet.includes(id) ? "set" : "keep";
+    }
+    return { verdict, qlab: qlabValue, last };
+  }));
+
+  // The moves. In each group (and the cue list), the existing cues of the sheet that form the longest run in sheet
+  // order stay; the others move, and so do the ones that come from another group.
+  const moved = new Set();
+  const byParent = new Map(); // parent key -> the uniqueIDs of the existing cues that go in it, in sheet order
+  sheet.forEach((o, d) => {
+    if (reused[d] >= 0) {
+      byParent.set(o.parent, [...(byParent.get(o.parent) ?? []), cues[reused[d]].id]);
+    }
+  });
+  for (const [parentKey, wanted] of byParent) {
+    const g = parentKey === "" ? -1 : reused[indexOfKey(parentKey)];
+    const holder = parentKey === "" ? qlab.listID : g >= 0 ? cues[g].id : "";
+    const positions = cues.filter(c => c.parent === holder && wanted.includes(c.id)).map(c => wanted.indexOf(c.id));
+    const staying = qlabLongestRisingRun(positions);
+    wanted.forEach((id, w) => staying.includes(w) || moved.add(id));
+  }
+
+  // The steps. Cue numbers that change are cleared first, so that none is still taken by another cue when it is set.
+  const steps = [];
+  const numberChanges = d => reused[d] < 0 || cues[reused[d]].number !== sheet[d].number;
+  for (const i of removed) {
+    if (cues[i].number !== "") {
+      steps.push(["clearNumber", cues[i].id]);
+    }
+  }
+  sheet.forEach((o, d) => {
+    if (reused[d] >= 0 && numberChanges(d) && cues[reused[d]].number !== "") {
+      steps.push(["clearNumber", cues[reused[d]].id]);
+    }
+  });
+
+  const files = qlab.files == null ? null : new Set(qlab.files.map(f => String(f).normalize("NFC")));
+  const missingFile = name => files != null && !files.has(String(name).normalize("NFC"));
+  const sections = new Map(); // lower-case row id -> { row, lines }
+  const lineIn = (key, sign, text) => {
+    const row = key.split("/")[0];
+    if (!sections.has(lower(row))) {
+      sections.set(lower(row), { row, lines: [] });
+    }
+    sections.get(lower(row)).lines.push({ sign, text });
+  };
+  const counts = { created: 0, updated: 0, moved: moved.size, renamed: renames.filter(r => r.accepted).length, removed: 0, kept: 0 };
+
+  sheet.forEach((o, d) => {
+    const c = cues[reused[d]];
+    const ref = refOf(d);
+    if (!c) {
+      steps.push(["create", ref, o.type, holderOf(o.parent)]);
+      lineIn(o.key, "+", `${o.number} ${o.values[0][1]} (new ${o.kind})`);
+      counts.created++;
+    } else {
+      if (c.name.startsWith("REMOVED ")) {
+        steps.push(["restore", ref, c.name.slice(8)]);
+        lineIn(o.key, "^", `${o.number} comes back (it was marked REMOVED)`);
+      }
+      if (numberChanges(d)) {
+        lineIn(o.key, "#", `${c.number || "(no number)"} → ${o.number}`);
+      }
+      if (moved.has(c.id)) {
+        lineIn(o.key, ">", `${o.number} moves`);
+      }
+    }
+    if (numberChanges(d)) {
+      steps.push(["number", ref, o.number]);
+    }
+    if (o.target) {
+      const target = refOf(indexOfKey(o.target));
+      if (!c || c.target !== target) {
+        steps.push(["target", ref, target]);
+      }
+    }
+
+    // The Notes remember the sheet's values (also where the QLab value is kept, so it stays until the sheet changes
+    // again), except where they can't be set, so that those are tried again next time.
+    const remember = [];
+    let anySet = false;
+    let anyKept = false;
+    o.values.forEach(([name, value], vi) => {
+      const { verdict, qlab: qlabValue, last } = verdicts[d][vi];
+      if (verdict === "set") {
+        steps.push(["set", ref, name, value, o.number]);
+        if (c) {
+          lineIn(o.key, "~", `${o.number} ${name}: ${qlabShownValue(name, qlabValue)} → ${qlabShownValue(name, value)}`);
+          anySet = true;
+        }
+        if (name === "file" && missingFile(value)) {
+          lineIn(o.key, "!", `${o.number} missing file ${qlab.mediaPath}/${value}`);
+        }
+      } else if (verdict === "keep") {
+        anyKept = true;
+        if (conflicts.some(q => q.id === `${o.key}#${name}`)) {
+          lineIn(o.key, "=", `${o.number} ${name}: keeps ${qlabShownValue(name, qlabValue)} from QLab (the sheet has ${qlabShownValue(name, value)})`);
+        }
+        if (name === "file" && qlabValue === "") {
+          lineIn(o.key, "!", `${o.number} has no file in QLab (the sheet has ${qlabShownValue(name, value)})`);
+        }
+      }
+      remember.push([name, value, verdict === "set" ? last : value]);
+    });
+    if (o.files) {
+      remember.push(["files", o.files, o.files]);
+    }
+    steps.push(["notes", ref, o.key, remember, c ? c.extra : ""]);
+    counts.updated += anySet ? 1 : 0;
+    counts.kept += anyKept ? 1 : 0;
+  });
+
+  // Put the cues of each group, and of the cue list, in sheet order.
+  const holders = [];
+  for (const o of sheet) {
+    if (!holders.includes(o.parent)) {
+      holders.push(o.parent);
+    }
+  }
+  for (const parentKey of holders) {
+    steps.push(["place", holderOf(parentKey), sheet.map((o, d) => o.parent === parentKey ? refOf(d) : null).filter(r => r != null)]);
+  }
+
+  // The cues the sheet doesn't have anymore aren't deleted, but switched off and moved out of the way, to be deleted
+  // by hand: disarmed, without a number (cleared above), red, named "REMOVED ...", and at the end of the cue list (a
+  // removed group with what is inside it).
+  const removedIDs = removed.map(i => cues[i].id);
+  for (const i of removed) {
+    const c = cues[i];
+    const already = c.name.startsWith("REMOVED ");
+    steps.push(["remove", c.id, already ? "" : `REMOVED ${c.name}`, removedIDs.includes(c.parent) ? "no" : "yes"]);
+    if (!already) {
+      lineIn(oldKeys[i], "-", `${c.number || "(no number)"} ${c.name}: marked REMOVED`);
+      counts.removed++;
+    }
+  }
+  for (const i of duplicates) {
+    lineIn(oldKeys[i], "!", `${cues[i].number || "(no number)"} has the same key as another cue (copied in QLab?), so it is treated as added by hand`);
+  }
+
+  // The headers of the sections.
+  const groups = new Set(sheet.filter(o => o.parent === "").map(o => lower(o.key)));
+  for (const s of sections.values()) {
+    const d = indexOfKey(s.row);
+    const rename = renames.find(r => r.accepted && lower(r.to) === lower(s.row));
+    s.status = rename ? "renamed" : d < 0 ? "removed" : reused[d] < 0 ? "new" : "changed";
+    s.header = rename ? `${rename.from} → ${s.row}` : s.row;
+    s.title = d >= 0 ? sheet[d].values[0][1] : (cues.find(c => lower(c.key) === lower(s.row))?.name ?? "").replace(/^REMOVED /, "");
+  }
+  const changes = [...sections.values()].reduce((n, s) => n + s.lines.filter(l => l.sign !== "=" && l.sign !== "!").length, 0);
+  const unchanged = [...groups].filter(row => !sections.has(row)).length;
+  return { renames, conflicts, sections: [...sections.values()], unchanged, changes, counts, steps };
+}
+
+/**
+ * What to do with one value of an existing cue, from its value in QLab, in the sheet, and in the sheet last time (null
+ * if unknown): "same" (nothing to do), "set" (only the sheet changed it), "keep" (only QLab changed it) or "conflict"
+ * (both changed it).
+ */
+function qlabDecide(qlabValue, sheetValue, lastValue) {
+  if (qlabValue === sheetValue) {
+    return "same";
+  }
+  if (lastValue == null || qlabValue === lastValue) {
+    return "set";
+  }
+  return sheetValue === lastValue ? "keep" : "conflict";
+}
+
+/** A key with the row id `from` renamed to `to`, also where it names the media of that row (see generateQlab). */
+function qlabRenamedKey(k, from, to) {
+  if (k === from) {
+    return to;
+  }
+  if (k.startsWith(from + "/")) {
+    k = to + k.slice(from.length);
+  }
+  return k.split(`:${from}/`).join(`:${to}/`);
+}
+
+/** The items of a rising run (not necessarily adjacent) in a list of numbers that is as long as possible. */
+function qlabLongestRisingRun(seq) {
+  const best = []; // for each item: the length of the longest run that ends with it
+  const prior = []; // for each item: the index of the item before it in that run, or -1
+  let last = -1;
+  seq.forEach((x, i) => {
+    best.push(1);
+    prior.push(-1);
+    for (let j = 0; j < i; j++) {
+      if (seq[j] < x && best[j] + 1 > best[i]) {
+        best[i] = best[j] + 1;
+        prior[i] = j;
+      }
+    }
+    if (last < 0 || best[i] > best[last]) {
+      last = i;
+    }
+  });
+  const run = [];
+  for (let i = last; i >= 0; i = prior[i]) {
+    run.unshift(seq[i]);
+  }
+  return run;
+}
+
+/** A value as the preview shows it: times in seconds. */
+function qlabShownValue(name, value) {
+  if (value == null || value === "") {
+    return "nothing";
+  }
+  if (name === "preWait" || name === "duration") {
+    return `${Number(value) / 1000} s`;
+  }
+  if (name === "opacity") {
+    return String(Number(value) / 1000);
+  }
+  return `"${value}"`;
+}
+
 /** Converts an op into an AppleScript record. */
 function toAppleScriptRecord(op) {
   // Keys are prefixed with "z" so they can't clash with terms from QLab's AppleScript dictionary.
