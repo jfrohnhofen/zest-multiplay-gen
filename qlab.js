@@ -239,6 +239,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         loop: p.loop,
         layer: p.layer,
         rotation: p.rotate,
+        scale: p.scale,
       });
       if (fade > 0) {
         add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: mediaCue(idx), duration: fade, opacity: 1, stop: false });
@@ -273,6 +274,7 @@ function removeFromScreens(onScreen, idx) {
  * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
  * - `$layer <n>`: QLab video layer (higher is on top).
  * - `$rotate <degrees>`: rotate the media around the Z axis, in whole degrees (e.g. 90 or -90).
+ * - `$scale <factor>`: scale the media horizontally and vertically by this factor (e.g. 1.8).
  *
  * Control actions target media that is already running, without needing a file:
  * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
@@ -281,7 +283,7 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, scale: null, actions: [], hasMediaParams: false };
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -324,6 +326,12 @@ function parseVideoParams(input, where) {
       case "$rotate":
         assert(args.length === 1 && !isNaN(Number(args[0])), `${where}: usage $rotate <degrees>`);
         result.rotate = Number(args[0]);
+        result.hasMediaParams = true;
+        break;
+      case "$scale":
+        // At least one thousandth, the precision the script compares it in (see sheetValues).
+        assert(args.length === 1 && Number(args[0]) >= 0.001, `${where}: usage $scale <factor> (a number above 0, e.g. 1.8)`);
+        result.scale = Number(args[0]);
         result.hasMediaParams = true;
         break;
       case "!fade-out":
@@ -380,6 +388,9 @@ function sheetValues(op) {
       // In whole degrees from -179 to 180, as the script reads it back (see QLAB_OSC_PERL).
       const degrees = ((Math.round(op.rotation) % 360) + 360) % 360;
       values.push(["rotation", String(degrees > 180 ? degrees - 360 : degrees)]);
+    }
+    if (op.scale != null) {
+      values.push(["scale", thousandths(op.scale)]);
     }
   }
   if (op.op === "fade") {
@@ -808,6 +819,10 @@ function qlabShownValue(name, value) {
   if (name === "rotation") {
     return value === "3d" ? "a 3D rotation" : `${value}°`;
   }
+  if (name === "scale") {
+    // As the script reads it: "fill" in Fill Stage mode, "<x>/<y>" if the two scales differ.
+    return value === "fill" ? "Fill Stage" : value.split("/").map(x => Number(x) / 1000).join(" × ");
+  }
   return `"${value}"`;
 }
 
@@ -1187,8 +1202,8 @@ end fileName
 -- The values the sheet controls for each cue type (see sheetValues in qlab.js).
 on valueNames(cueType)
   if cueType is "Group" then return {"name", "continue", "preWait"}
-  if cueType is "Video" then return {"name", "continue", "file", "stage", "opacity", "loop", "layer"}
-  if cueType is "Camera" then return {"name", "continue", "stage", "opacity", "layer"}
+  if cueType is "Video" then return {"name", "continue", "file", "stage", "opacity", "loop", "layer", "scale"}
+  if cueType is "Camera" then return {"name", "continue", "stage", "opacity", "layer", "scale"}
   if cueType is "Fade" then return {"name", "continue", "duration", "opacity", "stopWhenDone"}
   return {"name", "continue"}
 end valueNames
@@ -1221,6 +1236,13 @@ on readValue(c, n)
       if n is "opacity" then return my thousandths(opacity of c)
       if n is "loop" then return (infinite loop of c) as text
       if n is "layer" then return (layer of c) as text
+      if n is "scale" then
+        if fill stage of c then return "fill"
+        set scaleX to my thousandths(scale x of c)
+        set scaleY to my thousandths(scale y of c)
+        if scaleX is scaleY then return scaleX
+        return scaleX & "/" & scaleY
+      end if
       if n is "duration" then return my thousandths(duration of c)
       if n is "stopWhenDone" then return (stop target when done of c) as text
     end try
@@ -1352,6 +1374,15 @@ on setValue(c, n, v)
       set infinite loop of c to (v is "true")
     else if n is "layer" then
       set layer of c to (v as integer)
+    else if n is "scale" then
+      -- Geometry mode "Custom", then both scales.
+      try
+        set fill stage of c to false
+        set scale x of c to (v as integer) / 1000
+        set scale y of c to (v as integer) / 1000
+      on error e
+        return "can't scale it (" & e & ")"
+      end try
     else if n is "duration" then
       set duration of c to (v as integer) / 1000
     else if n is "stopWhenDone" then
