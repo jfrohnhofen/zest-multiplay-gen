@@ -507,6 +507,16 @@ function qlabPlan(sheet, qlab, answers) {
   const refOf = d => reused[d] >= 0 ? cues[reused[d]].id : `new:${sheet[d].key}`;
   const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
 
+  // A cue whose $scale was removed from the sheet goes back to Fill Stage, as a change of the sheet. A rotated cue can't
+  // be in Fill Stage (rotating needs Geometry mode Custom), so it goes back to scale 1.
+  sheet = sheet.map((o, d) => {
+    const hasValue = name => o.values.some(([n]) => n === name);
+    if (reused[d] < 0 || hasValue("scale") || !cues[reused[d]].remembered.has("scale")) {
+      return o;
+    }
+    return { ...o, values: [...o.values, ["scale", hasValue("rotation") ? "1000" : "fill"]] };
+  });
+
   // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
   const conflicts = [];
   const verdicts = sheet.map((o, d) => o.values.map(([name, value]) => {
@@ -1375,8 +1385,12 @@ on setValue(c, n, v)
     else if n is "layer" then
       set layer of c to (v as integer)
     else if n is "scale" then
-      -- Geometry mode "Custom", then both scales.
+      -- Fill Stage, or Geometry mode "Custom" and both scales.
       try
+        if v is "fill" then
+          set fill stage of c to true
+          return ""
+        end if
         set fill stage of c to false
         set scale x of c to (v as integer) / 1000
         set scale y of c to (v as integer) / 1000

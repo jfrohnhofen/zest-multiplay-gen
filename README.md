@@ -216,7 +216,8 @@ A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or
   without a passcode (Workspace Settings > Network > OSC Access), the script asks for the passcode with Edit
   permission; it isn't saved. Like `$layer`, the sheet only controls the rotation of cues that have `$rotate`.
 - `$scale <factor>` — Scale the media horizontally and vertically by this factor, e.g. `1.8`. The script sets the cue's
-  Geometry mode to Custom and both scale values. Like `$layer`, the sheet only controls the scale of cues that have `$scale`.
+  Geometry mode to Custom and both scale values. Removing `$scale` from the sheet puts the cue back in Fill Stage (or at
+  scale 1 if it has `$rotate`, which needs Custom). The sheet doesn't control the scale of cues that never had `$scale`.
 - `!fade-out [#label] [<sec>]` — Fade out and stop the labeled media, or everything on this screen (nothing if the screen is empty).
 - `!stop [#label]` — Stop immediately (blackout), like `!fade-out`.
 - `!pause [#label]` — Pause the labeled video, or everything playing on this screen (the frame stays on screen).
