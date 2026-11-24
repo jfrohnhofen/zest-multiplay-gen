@@ -106,6 +106,8 @@ function qlabScript(ops, rebuild) {
     REBUILD: String(rebuild),
     STEPS: asTextLines("stepsJSON", rebuild ? JSON.stringify(qlabPlan(sheet, { listID: "", mediaPath: "", files: null, cues: [] }, {}).steps) : ""),
     OSC_PERL: asString(QLAB_OSC_PERL),
+    ROTATED_KEYS: asList(sheet.filter(o => o.values.some(([n]) => n === "rotation")).map(o => o.key)),
+    CROPPED_KEYS: asList(sheet.filter(o => o.values.some(([n]) => n === "crop")).map(o => o.key)),
     PAGE: asTextLines("pageJSON", rebuild ? "" : JSON.stringify([qlabPage(sheet)])),
   };
   // In one pass, so that a placeholder inside a filled in text (e.g. a cue name) stays as it is.
@@ -388,6 +390,11 @@ const QLAB_FILL_STYLES = ["fit", "fill", "stretch"];
 /** Quotes a JS string as an AppleScript string literal. */
 function asString(s) {
   return '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, " ") + '"';
+}
+
+/** An AppleScript list literal of JS strings. */
+function asList(items) {
+  return "{" + items.map(asString).join(", ") + "}";
 }
 
 /**
@@ -1190,6 +1197,10 @@ property problems : {}
 
 -- OSC, for rotating cues (see QLAB_OSC_PERL in qlab.js).
 property oscPerl : %%OSC_PERL%%
+-- The keys of the cues the sheet rotates or crops: their rotation and crop are read with OSC even if the sheet didn't
+-- rotate or crop them before (e.g. when they were cropped by hand), so that a value that is already right isn't a change.
+property rotatedKeys : %%ROTATED_KEYS%%
+property croppedKeys : %%CROPPED_KEYS%%
 property oscPasscode : "" -- asked for only if QLab refuses without one
 property oscAsked : false
 
@@ -1360,13 +1371,24 @@ on oscValuesOf(entry)
   set found to {}
   if (item 2 of entry) is not in {"Video", "Camera"} then return found
   set cueID to item 1 of entry
-  if (item 6 of entry) contains "rotation=" then set end of found to {"rotation", "/cue_id/" & cueID & "/quaternion", cueID}
-  if (item 6 of entry) contains "crop=" then set end of found to {"crop", "/cue_id/" & cueID & "/crop", "crop:" & cueID}
+  set cueNotes to item 6 of entry
+  set cueKey to ""
+  if cueNotes starts with "zest:" then set cueKey to text 6 thru -1 of paragraph 1 of cueNotes
+  if cueNotes contains "rotation=" or cueKey is in rotatedKeys then set end of found to {"rotation", "/cue_id/" & cueID & "/quaternion", cueID}
+  if cueNotes contains "crop=" or cueKey is in croppedKeys then set end of found to {"crop", "/cue_id/" & cueID & "/crop", "crop:" & cueID}
   return found
 end oscValuesOf
 
--- Adds the rotation and the crop of each video and camera cue that the sheet rotated or cropped before to its values in
--- scanned, read with OSC (AppleScript can't).
+-- True if a cue in scanned is in Fill Stage (its scale reads as a style, see readValue), where QLab doesn't crop.
+on inFillStage(entry)
+  repeat with p in item 8 of entry
+    if item 1 of p is "scale" then return (item 2 of p) is in {"fit", "fill", "stretch"}
+  end repeat
+  return false
+end inFillStage
+
+-- Adds the rotation and the crop of each video and camera cue that the sheet rotates or crops, or did before, to its
+-- values in scanned, read with OSC (AppleScript can't). A cue in Fill Stage isn't cropped, whatever its crop fields say.
 on readOscValues()
   set oscWords to {}
   repeat with i from 1 to count of scanned
@@ -1390,6 +1412,7 @@ on readOscValues()
   repeat with i from 1 to count of scanned
     repeat with v in my oscValuesOf(item i of scanned)
       set r to my oscValueIn(replyLines, item 3 of v)
+      if r is not "" and item 1 of v is "crop" and my inFillStage(item i of scanned) then set r to "0/0/0/0"
       if r is not "" then set end of item 8 of item i of scanned to {item 1 of v, r}
     end repeat
   end repeat
