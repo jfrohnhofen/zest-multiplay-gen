@@ -49,6 +49,21 @@ function toXml(name, val) {
 }
 
 /**
+ * Deep-merges two objects into a new object (unlike `{...a, ...b}`, which replaces nested objects wholesale, e.g. the
+ * `File` of a cue that is given both a hard-coded `$Name` and a parsed `$StartPos`). Plain objects present on both sides are merged
+ * recursively, with `b` winning on conflicts. Anything else (primitives, arrays, XmlService elements, ...) is replaced
+ * by the value from `b`. Either side may be undefined.
+ */
+function deepMerge(a, b) {
+  const isPlain = x => x !== null && typeof x === "object" && Object.getPrototypeOf(x) === Object.prototype;
+  const out = {...a};
+  for (const [k, v] of Object.entries(b || {})) {
+    out[k] = isPlain(v) && isPlain(out[k]) ? deepMerge(out[k], v) : v;
+  }
+  return out;
+}
+
+/**
  * Asserts that a condition is truthy, throwing an Error with the specified message if not.
  */
 function assert(cond, msg) {

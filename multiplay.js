@@ -105,10 +105,10 @@ function generateMultiplay(cues) {
     const xml = { ...line.xml };
     const isGo = cue.trigger.kind === "go";
     if (xml.Control && typeof xml.Control.$Target === "object") {
-      xml.Control = { ...xml.Control, $Target: xml.Control.$Target.uid };
+      xml.Control = deepMerge(xml.Control, { $Target: xml.Control.$Target.uid });
     }
     if (line.preWait > 0) {
-      xml.Wait = { ...xml.Wait, $Pre: Math.round(line.preWait * 1000) };
+      xml.Wait = deepMerge(xml.Wait, { $Pre: Math.round(line.preWait * 1000) });
     }
     return {...xml, ...{
       UID: line.uid,
@@ -194,13 +194,13 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
     const duplicateLabel = hasLabel && !ctx.check(!soundLabels.has(label), `duplicate label #${label}`);
 
     if (hasValidFile) {
-      const line = addLine("SX", cue.tracks.sound.description, {...{
+      const line = addLine("SX", cue.tracks.sound.description, deepMerge({
         Type: 0,
         File: {
           $Name: `${LOCAL_FOLDER}\\sound\\${file.name}`,
         },
         AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
-      }, ...params});
+      }, params));
       if (hasLabel && !duplicateLabel) {
         soundLabels.set(label, line);
       }
