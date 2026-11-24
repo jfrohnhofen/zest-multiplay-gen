@@ -276,7 +276,7 @@ function removeFromScreens(onScreen, idx) {
  * - `$rotate <degrees>`: rotate the media around the Z axis, in whole degrees (e.g. 90 or -90).
  * - `$scale <factor>`: scale the media horizontally and vertically by this factor (e.g. 1.8).
  * - `$scale fit|fill|stretch`: Fill Stage, fitting the media in the stage, filling it (cropping the media) or stretching
- *   it. Without `$scale` a video fills the stage (`fill`), unless it is rotated. Can't be used with `$rotate`, which needs
+ *   it. Without `$scale` a video fits in the stage (`fit`), unless it is rotated. Can't be used with `$rotate`, which needs
  *   Geometry mode Custom.
  *
  * Control actions target media that is already running, without needing a file:
@@ -403,8 +403,8 @@ function sheetValues(op) {
     if (op.scale != null) {
       values.push(["scale", typeof op.scale === "string" ? op.scale : thousandths(op.scale)]);
     } else if (op.op === "video" && op.rotation == null) {
-      // Without $scale a video fills the stage. A rotated one stays in Geometry mode Custom (see qlabPlan).
-      values.push(["scale", "fill"]);
+      // Without $scale a video fits in the stage. A rotated one stays in Geometry mode Custom (see qlabPlan).
+      values.push(["scale", "fit"]);
     }
   }
   if (op.op === "fade") {
@@ -522,14 +522,14 @@ function qlabPlan(sheet, qlab, answers) {
   const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
 
   // A cue whose $scale was removed from the sheet goes back to Fill Stage, as a change of the sheet (a video already
-  // has "fill" then, see sheetValues). A rotated cue can't be in Fill Stage (rotating needs Geometry mode Custom), so it
+  // has "fit" then, see sheetValues). A rotated cue can't be in Fill Stage (rotating needs Geometry mode Custom), so it
   // goes back to scale 1.
   sheet = sheet.map((o, d) => {
     const hasValue = name => o.values.some(([n]) => n === name);
     if (reused[d] < 0 || hasValue("scale") || !cues[reused[d]].remembered.has("scale")) {
       return o;
     }
-    return { ...o, values: [...o.values, ["scale", hasValue("rotation") ? "1000" : "fill"]] };
+    return { ...o, values: [...o.values, ["scale", hasValue("rotation") ? "1000" : "fit"]] };
   });
 
   // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
@@ -1270,7 +1270,8 @@ on readValue(c, n)
           try
             return (fill style of c) as text
           end try
-          return "fill"
+          -- No style (e.g. a camera cue, if it has none): reads as the sheet's default.
+          return "fit"
         end if
         set scaleX to my thousandths(scale x of c)
         set scaleY to my thousandths(scale y of c)

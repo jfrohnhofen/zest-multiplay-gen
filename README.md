@@ -219,7 +219,7 @@ A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or
   Geometry mode to Custom and both scale values.
 - `$scale fit`, `$scale fill`, `$scale stretch` — Fill Stage, fitting the media in the stage, filling it (cropping the
   media) or stretching it. These can't be combined with `$rotate`, which needs Geometry mode Custom: use a factor.
-- Without `$scale`, a video is in Fill Stage with `fill`. A rotated one stays in Custom; if it had a `$scale` before, it
+- Without `$scale`, a video is in Fill Stage with `fit`. A rotated one stays in Custom; if it had a `$scale` before, it
   goes back to scale 1. A live camera's scale is only set by `$scale` (removing it puts the camera back in Fill Stage).
 - `!fade-out [#label] [<sec>]` — Fade out and stop the labeled media, or everything on this screen (nothing if the screen is empty).
 - `!stop [#label]` — Stop immediately (blackout), like `!fade-out`.
