@@ -160,7 +160,7 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
           $AddLF: -1,
         },
         {
-          $Data: `goto cue ${cue.cue}`,
+          $Data: `goto cue ${cue.cue.slice(1)}`,
           $Format: 0,
           $AddCR: -1,
           $AddLF: -1,
@@ -226,8 +226,8 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
         Msg: {
           $Data: `/cue/${cue.cue}/start`,
           $Format: 0,
-          $AddCR: 0,
-          $AddLF: 0,
+          $AddCR: -1,
+          $AddLF: -1,
         },
       }],
     });
@@ -383,8 +383,8 @@ const multiplay = XmlService.parse(`<?xml version="1.0" encoding="UTF-8"?>
   </Audio>
   <MIDI/>
   <Network>
-    <Patch Name="grandMA2" Destination="127.0.0.1" Adapter="Local Host" Port="30000" Encoding="2" Enabled="-1"/>
-    <Patch Name="QLab" Destination="192.168.0.80" Adapter="{552E5721-8042-4E9E-ADE6-FB41CBDA4E0A}" Port="53000" Encoding="1" Enabled="-1"/>
+    <Patch Name="grandMA2" Destination="192.168.0.147" Adapter="" Port="30000" Encoding="2" Enabled="-1"/>
+    <Patch Name="QLab" Destination="192.168.0.97" Adapter="" Port="53000" Encoding="1" Enabled="-1"/>
   </Network>
   <Video/>
 </Production>`);
