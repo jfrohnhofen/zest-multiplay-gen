@@ -19,7 +19,7 @@ An automated Google Apps Script project for theatre productions that parses mast
 - **QLab Video Cue List Generator**: Outputs an AppleScript that rebuilds the QLab video cue list from the sheet, with cue numbers matching the MultiPlay triggers.
   - Multiple screens (QLab stages), each with its own file and params column.
   - Video, image and live camera (`@camera`) cues, with automatic fade-ins and crossfades.
-  - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`, `$rotate`.
+  - Parameter controls: `$fade-dur`, `$loop`, `$keep`, `$layer`, `$rotate`, `$scale`.
   - Cue targeting & control actions: `#label` tags, `!fade-out`, `!stop`, `!pause` and `!resume`.
   - An update script that changes the existing cue list in place and keeps the changes made in QLab, after showing a
     preview of the changes to approve (see [Updating the cue list](#updating-the-cue-list)).
@@ -159,7 +159,7 @@ the sheet, independently of its cue number. The second line remembers the values
 
 The update script finds the cues it generated before by their keys, so it doesn't depend on cue numbers:
 
-- **The sheet controls** each cue's name, file, stage, opacity, loop, layer, rotation, fade duration, stop-when-done, pre-wait
+- **The sheet controls** each cue's name, file, stage, opacity, loop, layer, rotation, scale, fade duration, stop-when-done, pre-wait
   and continue mode, and the cue numbers, targets and order.
 - **The second line of the Notes remembers the sheet's values from the last run.** That tells the script who changed
   a value since then:
@@ -215,6 +215,12 @@ A file name (or Drive smart chip) inside `QLAB_MEDIA_FOLDER` on the QLab Mac, or
   cue's Geometry mode to Custom and rotates it with OSC, as AppleScript can't. If the workspace doesn't allow OSC
   without a passcode (Workspace Settings > Network > OSC Access), the script asks for the passcode with Edit
   permission; it isn't saved. Like `$layer`, the sheet only controls the rotation of cues that have `$rotate`.
+- `$scale <factor>` — Scale the media horizontally and vertically by this factor, e.g. `1.8`. The script sets the cue's
+  Geometry mode to Custom and both scale values.
+- `$scale fit`, `$scale fill`, `$scale stretch` — Fill Stage, fitting the media in the stage, filling it (cropping the
+  media) or stretching it. These can't be combined with `$rotate`, which needs Geometry mode Custom: use a factor.
+- Without `$scale`, a video is in Fill Stage with `fit`. A rotated one stays in Custom; if it had a `$scale` before, it
+  goes back to scale 1. A live camera's scale is only set by `$scale` (removing it puts the camera back in Fill Stage).
 - `!fade-out [#label] [<sec>]` — Fade out and stop the labeled media, or everything on this screen (nothing if the screen is empty).
 - `!stop [#label]` — Stop immediately (blackout), like `!fade-out`.
 - `!pause [#label]` — Pause the labeled video, or everything playing on this screen (the frame stays on screen).

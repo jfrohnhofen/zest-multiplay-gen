@@ -239,6 +239,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         loop: p.loop,
         layer: p.layer,
         rotation: p.rotate,
+        scale: p.scale,
       });
       if (fade > 0) {
         add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: mediaCue(idx), duration: fade, opacity: 1, stop: false });
@@ -273,6 +274,10 @@ function removeFromScreens(onScreen, idx) {
  * - `$keep`: don't fade out what is already on this screen; the new media is layered on top.
  * - `$layer <n>`: QLab video layer (higher is on top).
  * - `$rotate <degrees>`: rotate the media around the Z axis, in whole degrees (e.g. 90 or -90).
+ * - `$scale <factor>`: scale the media horizontally and vertically by this factor (e.g. 1.8).
+ * - `$scale fit|fill|stretch`: Fill Stage, fitting the media in the stage, filling it (cropping the media) or stretching
+ *   it. Without `$scale` a video fits in the stage (`fit`), unless it is rotated. Can't be used with `$rotate`, which needs
+ *   Geometry mode Custom.
  *
  * Control actions target media that is already running, without needing a file:
  * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
@@ -281,7 +286,7 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, scale: null, actions: [], hasMediaParams: false };
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -326,6 +331,15 @@ function parseVideoParams(input, where) {
         result.rotate = Number(args[0]);
         result.hasMediaParams = true;
         break;
+      case "$scale": {
+        const style = String(args[0] ?? "").toLowerCase();
+        // A factor of at least one thousandth, the precision the script compares it in (see sheetValues).
+        assert(args.length === 1 && (QLAB_FILL_STYLES.includes(style) || Number(args[0]) >= 0.001),
+          `${where}: usage $scale <factor> (a number above 0, e.g. 1.8) or $scale fit|fill|stretch`);
+        result.scale = QLAB_FILL_STYLES.includes(style) ? style : Number(args[0]);
+        result.hasMediaParams = true;
+        break;
+      }
       case "!fade-out":
       case "!stop":
       case "!pause":
@@ -345,8 +359,13 @@ function parseVideoParams(input, where) {
         assert(false, `${where}: invalid video param "${name}"`);
     }
   }
+  assert(!(typeof result.scale === "string" && result.rotate != null),
+    `${where}: $scale ${result.scale} can't be used with $rotate (rotating needs Geometry mode Custom: use $scale <factor>)`);
   return result;
 }
+
+// The Fill Stage styles of a video cue, as QLab's AppleScript names them (`fill style`).
+const QLAB_FILL_STYLES = ["fit", "fill", "stretch"];
 
 /** Quotes a JS string as an AppleScript string literal. */
 function asString(s) {
@@ -380,6 +399,12 @@ function sheetValues(op) {
       // In whole degrees from -179 to 180, as the script reads it back (see QLAB_OSC_PERL).
       const degrees = ((Math.round(op.rotation) % 360) + 360) % 360;
       values.push(["rotation", String(degrees > 180 ? degrees - 360 : degrees)]);
+    }
+    if (op.scale != null) {
+      values.push(["scale", typeof op.scale === "string" ? op.scale : thousandths(op.scale)]);
+    } else if (op.op === "video" && op.rotation == null) {
+      // Without $scale a video fits in the stage. A rotated one stays in Geometry mode Custom (see qlabPlan).
+      values.push(["scale", "fit"]);
     }
   }
   if (op.op === "fade") {
@@ -495,6 +520,17 @@ function qlabPlan(sheet, qlab, answers) {
   });
   const refOf = d => reused[d] >= 0 ? cues[reused[d]].id : `new:${sheet[d].key}`;
   const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
+
+  // A cue whose $scale was removed from the sheet goes back to Fill Stage, as a change of the sheet (a video already
+  // has "fit" then, see sheetValues). A rotated cue can't be in Fill Stage (rotating needs Geometry mode Custom), so it
+  // goes back to scale 1.
+  sheet = sheet.map((o, d) => {
+    const hasValue = name => o.values.some(([n]) => n === name);
+    if (reused[d] < 0 || hasValue("scale") || !cues[reused[d]].remembered.has("scale")) {
+      return o;
+    }
+    return { ...o, values: [...o.values, ["scale", hasValue("rotation") ? "1000" : "fit"]] };
+  });
 
   // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
   const conflicts = [];
@@ -807,6 +843,13 @@ function qlabShownValue(name, value) {
   }
   if (name === "rotation") {
     return value === "3d" ? "a 3D rotation" : `${value}°`;
+  }
+  if (name === "scale") {
+    // As the script reads it: the style in Fill Stage mode (fit, fill or stretch), "<x>/<y>" if the two scales differ.
+    if (/^[a-z]+$/.test(value)) {
+      return `Fill Stage (${value})`;
+    }
+    return value.split("/").map(x => Number(x) / 1000).join(" × ");
   }
   return `"${value}"`;
 }
@@ -1187,8 +1230,8 @@ end fileName
 -- The values the sheet controls for each cue type (see sheetValues in qlab.js).
 on valueNames(cueType)
   if cueType is "Group" then return {"name", "continue", "preWait"}
-  if cueType is "Video" then return {"name", "continue", "file", "stage", "opacity", "loop", "layer"}
-  if cueType is "Camera" then return {"name", "continue", "stage", "opacity", "layer"}
+  if cueType is "Video" then return {"name", "continue", "file", "stage", "opacity", "loop", "layer", "scale"}
+  if cueType is "Camera" then return {"name", "continue", "stage", "opacity", "layer", "scale"}
   if cueType is "Fade" then return {"name", "continue", "duration", "opacity", "stopWhenDone"}
   return {"name", "continue"}
 end valueNames
@@ -1221,6 +1264,20 @@ on readValue(c, n)
       if n is "opacity" then return my thousandths(opacity of c)
       if n is "loop" then return (infinite loop of c) as text
       if n is "layer" then return (layer of c) as text
+      if n is "scale" then
+        if fill stage of c then
+          -- fit, fill or stretch (see QLAB_FILL_STYLES in qlab.js)
+          try
+            return (fill style of c) as text
+          end try
+          -- No style (e.g. a camera cue, if it has none): reads as the sheet's default.
+          return "fit"
+        end if
+        set scaleX to my thousandths(scale x of c)
+        set scaleY to my thousandths(scale y of c)
+        if scaleX is scaleY then return scaleX
+        return scaleX & "/" & scaleY
+      end if
       if n is "duration" then return my thousandths(duration of c)
       if n is "stopWhenDone" then return (stop target when done of c) as text
     end try
@@ -1312,6 +1369,23 @@ on setRotation(c, v)
   return "QLab didn't rotate it to " & v & " degrees (is OSC allowed, with Edit permission? see Workspace Settings > Network > OSC Access)"
 end setRotation
 
+-- Puts a video cue in Fill Stage with a style: fit, fill or stretch. The style is set with a script compiled when it
+-- runs, so that a style QLab doesn't know (e.g. on a camera cue) is a problem with that cue, not an error that stops the
+-- whole script. Returns a problem, or "" if it worked.
+on setFillStyle(c, v)
+  try
+    tell application id "com.figure53.QLab.5"
+      set fill stage of c to true
+      set cueID to uniqueID of c
+    end tell
+    tell current application to run script "tell application id \\"com.figure53.QLab.5\\" to tell front workspace to set fill style of cue id \\"" & cueID & "\\" to " & v
+  on error e
+    return "can't set Fill Stage " & v & " (" & e & ")"
+  end try
+  if my readValue(c, "scale") is not v then return "QLab didn't set Fill Stage " & v
+  return ""
+end setFillStyle
+
 -- Sets one value the sheet controls. Returns a problem, or "" if it worked.
 on setValue(c, n, v)
   if n is "rotation" then return my setRotation(c, v)
@@ -1352,6 +1426,16 @@ on setValue(c, n, v)
       set infinite loop of c to (v is "true")
     else if n is "layer" then
       set layer of c to (v as integer)
+    else if n is "scale" then
+      -- Fill Stage with a style, or Geometry mode "Custom" and both scales.
+      if v is in {"fit", "fill", "stretch"} then return my setFillStyle(c, v)
+      try
+        set fill stage of c to false
+        set scale x of c to (v as integer) / 1000
+        set scale y of c to (v as integer) / 1000
+      on error e
+        return "can't scale it (" & e & ")"
+      end try
     else if n is "duration" then
       set duration of c to (v as integer) / 1000
     else if n is "stopWhenDone" then
