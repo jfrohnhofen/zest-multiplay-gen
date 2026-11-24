@@ -22,9 +22,9 @@ const MULTIPLAY_AUTO_APPEARANCE = { $BGColour: "202020", $FontColour: "FFFFFF" }
  * Each sheet row becomes one or multiple lines (LX, SX, VX, ...), chained to start together. How a row starts depends on its
  * trigger (see schedule.js):
  * - `go`: the first line is a manual cue the operator triggers. Rows of the same block follow in the same chain.
- * - `continue +N`: its lines are chained after the head's, with a pre-wait so that they start N s after the head's GO.
- *   A pre-wait counts from the start of the previous cue of the chain, so the chain stores the differences between
- *   the offsets of consecutive rows (offsets of a block must not decrease).
+ * - `continue +N`: its lines are chained after the head's, with a pre-wait of N s so that they start N s after the head's GO.
+ *   MultiPlay fires all cues of a chain at the same moment, so the pre-wait is the offset from the head, not the
+ *   difference to the previous row.
  * - `follow #sound +N`: its lines are chained right after the labeled sound, whose advance is follow-on-end, with a
  *   pre-wait of N s. A cue starts one successor only, so the labeled sound has to be the last cue of its chain.
  */
@@ -56,14 +56,13 @@ function generateMultiplay(cues) {
   const list = [];
   const layoutChain = rows => {
     rows = rows.filter(row => rowLines.get(row)?.length > 0);
-    let previousOffset = 0;
     for (const [i, row] of rows.entries()) {
       const lines = rowLines.get(row);
-      const delay = row.trigger.offset - previousOffset;
-      previousOffset = row.trigger.offset;
       lines[0].isFirst = true;
-      lines[0].preWait = delay;
       for (const [k, line] of lines.entries()) {
+        // All cues of a chain are fired at the same moment (the chain's trigger), so every cue waits for the full
+        // offset from the head, not for the difference to the previous cue.
+        line.preWait = row.trigger.offset;
         const isLast = i === rows.length - 1 && k === lines.length - 1;
         line.advance = isLast ? MULTIPLAY_ADVANCE.MANUAL : MULTIPLAY_ADVANCE.WITH;
         list.push(line);
