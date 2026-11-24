@@ -240,6 +240,7 @@ function buildVideoCue(row, where, { labels, media, onScreen, paused }) {
         layer: p.layer,
         rotation: p.rotate,
         scale: p.scale,
+        crop: p.crop,
       });
       if (fade > 0) {
         add(screenLabel, "fade-in", { op: "fade", name: `${screenLabel}: fade in ${media[idx].name}`, target: mediaCue(idx), duration: fade, opacity: 1, stop: false });
@@ -278,6 +279,8 @@ function removeFromScreens(onScreen, idx) {
  * - `$scale fit|fill|stretch`: Fill Stage, fitting the media in the stage, filling it (cropping the media) or stretching
  *   it. Without `$scale` a video fits in the stage (`fit`), unless it is rotated. Can't be used with `$rotate`, which needs
  *   Geometry mode Custom.
+ * - `$crop-top <px>`, `$crop-bottom <px>`, `$crop-left <px>`, `$crop-right <px>`: crop pixels off that edge of the media.
+ *   Cropping needs Geometry mode Custom, like `$rotate`, so it can't be used with `$scale fit|fill|stretch`.
  *
  * Control actions target media that is already running, without needing a file:
  * - `!fade-out [#label] [<sec>]`: fade out and stop the labeled media, or everything on this screen (default 1s).
@@ -286,7 +289,8 @@ function removeFromScreens(onScreen, idx) {
  * - `!resume [#label]`: resume the labeled video, or everything paused on this screen.
  */
 function parseVideoParams(input, where) {
-  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, scale: null, actions: [], hasMediaParams: false };
+  const result = { label: null, fade: null, loop: false, keep: false, layer: null, rotate: null, scale: null, crop: null, actions: [], hasMediaParams: false };
+  const cropEdges = new Set(); // the edges a $crop-<edge> line sets
   const num = (v, name) => {
     assert(v != null && !isNaN(Number(v)), `${where}: ${name} needs a number of seconds`);
     return Number(v);
@@ -340,6 +344,18 @@ function parseVideoParams(input, where) {
         result.hasMediaParams = true;
         break;
       }
+      case "$crop-top":
+      case "$crop-bottom":
+      case "$crop-left":
+      case "$crop-right": {
+        assert(args.length === 1 && /^\d+$/.test(args[0]), `${where}: usage ${name} <pixels> (a whole number, e.g. 50)`);
+        const edge = name.slice("$crop-".length);
+        assert(!cropEdges.has(edge), `${where}: ${name} is there twice`);
+        cropEdges.add(edge);
+        result.crop = { top: 0, bottom: 0, left: 0, right: 0, ...result.crop, [edge]: Number(args[0]) };
+        result.hasMediaParams = true;
+        break;
+      }
       case "!fade-out":
       case "!stop":
       case "!pause":
@@ -361,6 +377,8 @@ function parseVideoParams(input, where) {
   }
   assert(!(typeof result.scale === "string" && result.rotate != null),
     `${where}: $scale ${result.scale} can't be used with $rotate (rotating needs Geometry mode Custom: use $scale <factor>)`);
+  assert(!(typeof result.scale === "string" && result.crop != null),
+    `${where}: $scale ${result.scale} can't be used with $crop (cropping needs Geometry mode Custom: use $scale <factor>)`);
   return result;
 }
 
@@ -402,9 +420,14 @@ function sheetValues(op) {
     }
     if (op.scale != null) {
       values.push(["scale", typeof op.scale === "string" ? op.scale : thousandths(op.scale)]);
-    } else if (op.op === "video" && op.rotation == null) {
-      // Without $scale a video fits in the stage. A rotated one stays in Geometry mode Custom (see qlabPlan).
+    } else if (op.op === "video" && op.rotation == null && op.crop == null) {
+      // Without $scale a video fits in the stage. A rotated or cropped one stays in Geometry mode Custom (see qlabPlan).
       values.push(["scale", "fit"]);
+    }
+    if (op.crop != null) {
+      // In pixels, as "<top>/<bottom>/<left>/<right>" (see setCrop in QLAB_SCRIPT_TEMPLATE).
+      const { top, bottom, left, right } = op.crop;
+      values.push(["crop", [top, bottom, left, right].join("/")]);
     }
   }
   if (op.op === "fade") {
@@ -522,14 +545,19 @@ function qlabPlan(sheet, qlab, answers) {
   const holderOf = parentKey => parentKey === "" ? "list" : refOf(indexOfKey(parentKey));
 
   // A cue whose $scale was removed from the sheet goes back to Fill Stage, as a change of the sheet (a video already
-  // has "fit" then, see sheetValues). A rotated cue can't be in Fill Stage (rotating needs Geometry mode Custom), so it
-  // goes back to scale 1.
+  // has "fit" then, see sheetValues). A rotated or cropped cue can't be in Fill Stage (they need Geometry mode Custom),
+  // so it goes back to scale 1. Likewise a cue whose crop was removed from the sheet is uncropped.
   sheet = sheet.map((o, d) => {
     const hasValue = name => o.values.some(([n]) => n === name);
-    if (reused[d] < 0 || hasValue("scale") || !cues[reused[d]].remembered.has("scale")) {
-      return o;
+    const removed = name => reused[d] >= 0 && !hasValue(name) && cues[reused[d]].remembered.has(name);
+    const values = [...o.values];
+    if (removed("scale")) {
+      values.push(["scale", hasValue("rotation") || hasValue("crop") ? "1000" : "fit"]);
     }
-    return { ...o, values: [...o.values, ["scale", hasValue("rotation") ? "1000" : "fit"]] };
+    if (removed("crop")) {
+      values.push(["crop", "0/0/0/0"]);
+    }
+    return values.length === o.values.length ? o : { ...o, values };
   });
 
   // What to do with each value: set it, or keep the QLab value. A value both changed is a question.
@@ -844,6 +872,12 @@ function qlabShownValue(name, value) {
   if (name === "rotation") {
     return value === "3d" ? "a 3D rotation" : `${value}°`;
   }
+  if (name === "crop") {
+    // Pixels off each edge, "<top>/<bottom>/<left>/<right>" (see sheetValues).
+    const edges = value.split("/").map(Number);
+    const cropped = ["top", "bottom", "left", "right"].map((edge, i) => edges[i] ? `${edge} ${edges[i]}` : "").filter(x => x);
+    return cropped.length ? cropped.join(", ") + " px" : "no crop";
+  }
   if (name === "scale") {
     // As the script reads it: the style in Fill Stage mode (fit, fill or stretch), "<x>/<y>" if the two scales differ.
     if (/^[a-z]+$/.test(value)) {
@@ -1089,12 +1123,13 @@ render();
 
 /**
  * A Perl script (Perl comes with macOS) that sends OSC messages to QLab on the same Mac, for what AppleScript can't do:
- * rotating video cues. It connects over TCP (SLIP framed), so the replies come back on the same connection, and logs in
+ * rotating and cropping video cues. It connects over TCP (SLIP framed), so the replies come back on the same connection, and logs in
  * with /connect first if it is given a passcode (Workspace Settings > Network > OSC Access).
  *   perl -e <script> <passcode or ""> <address> [f:<number> | s:<text>]... [; <address> ...]...
  * It prints a line for each reply to /connect ("connect <status> <data>") and to /cue_id/<id>/quaternion ("<id> <status>
  * <rotation>", tab separated). The rotation is in whole degrees around the Z axis, from -179 to 180, or "3d" if the cue
- * is rotated around another axis too. QLab doesn't reply to the messages that change something.
+ * is rotated around another axis too. And to /cue_id/<id>/crop: "crop:<id> <status> <top>/<bottom>/<left>/<right>" in
+ * whole pixels. QLab doesn't reply to the messages that change something.
  * It has no comments and each statement ends with ";", because the script gets it on one line (see asString).
  */
 const QLAB_OSC_PERL = String.raw`use strict; use IO::Socket::INET; use JSON::PP;
@@ -1105,7 +1140,7 @@ sub message { my ($address, @args) = @_; my ($types, $data) = (',', ''); for (@a
 my @messages = ([]);
 for my $w (@words) { if ($w eq ';') { push @messages, []; } else { push @{$messages[-1]}, $w; } }
 @messages = grep { @$_ } @messages;
-my $expected = ($passcode ne '' ? 1 : 0) + scalar(grep { @$_ == 1 && $_->[0] =~ m{/quaternion$} } @messages);
+my $expected = ($passcode ne '' ? 1 : 0) + scalar(grep { @$_ == 1 && $_->[0] =~ m{/(quaternion|crop)$} } @messages);
 my $sock = IO::Socket::INET->new(PeerAddr => '127.0.0.1', PeerPort => 53000, Proto => 'tcp', Timeout => 2) or die "can't connect to QLab's OSC port (TCP 53000): $!\n";
 binmode $sock;
 my $out = $passcode ne '' ? message('/connect', "s:$passcode") : '';
@@ -1120,6 +1155,7 @@ for my $frame (grep { length } split /\xC0/, $buffer) {
   my $reply = eval { decode_json($parts[-1]) } or next;
   my ($address, $status) = ($reply->{address} // '', $reply->{status} // '');
   if ($address =~ m{/connect$}) { print join("\t", 'connect', $status, $reply->{data} // ''), "\n"; next; }
+  if ($address =~ m{/cue_id/([^/]+)/crop$}) { my ($id, $edges) = ($1, $reply->{data}); print join("\t", "crop:$id", $status, ($status eq 'ok' && ref $edges eq 'ARRAY' && @$edges == 4) ? join('/', map { sprintf('%.0f', $_) + 0 } @$edges) : ''), "\n"; next; }
   next unless $address =~ m{/cue_id/([^/]+)/quaternion$};
   my ($id, $degrees, $q) = ($1, '', $reply->{data});
   if ($status eq 'ok' && ref $q eq 'ARRAY' && @$q == 4) {
@@ -1295,8 +1331,9 @@ on oscRun(oscWords)
   return paragraphs of (do shell script cmd)
 end oscRun
 
--- The rotation of a cue in the replies of oscRun ("" if there is none, e.g. access denied).
-on rotationIn(replyLines, cueID)
+-- A value in the replies of oscRun ("" if there is none, e.g. access denied): the rotation of a cue by its uniqueID, or
+-- its crop by "crop:" & uniqueID (see QLAB_OSC_PERL in qlab.js).
+on oscValueIn(replyLines, cueID)
   set AppleScript's text item delimiters to tab
   repeat with x in replyLines
     set fields to text items of (contents of x)
@@ -1307,44 +1344,56 @@ on rotationIn(replyLines, cueID)
   end repeat
   set AppleScript's text item delimiters to ""
   return ""
-end rotationIn
+end oscValueIn
 
 -- Asks for the OSC passcode, once per run, when QLab doesn't let the script change cues without one.
 on askPasscode()
   set oscAsked to true
   activate
-  set dialogResult to display dialog "QLab doesn't let this script rotate cues over OSC without a passcode." & return & return & "Enter the passcode with Edit permission from Workspace Settings > Network > OSC Access (it isn't saved), or click Skip." default answer "" buttons {"Skip", "OK"} default button 2 with hidden answer
+  set dialogResult to display dialog "QLab doesn't let this script rotate or crop cues over OSC without a passcode." & return & return & "Enter the passcode with Edit permission from Workspace Settings > Network > OSC Access (it isn't saved), or click Skip." default answer "" buttons {"Skip", "OK"} default button 2 with hidden answer
   if button returned of dialogResult is "OK" then set oscPasscode to text returned of dialogResult
 end askPasscode
 
--- Adds the rotation of each video and camera cue that the sheet rotated before (see sheetValues in qlab.js) to its
--- values in scanned, read with OSC.
-on readRotations()
+-- The values read with OSC that a cue in scanned has: its rotation and its crop, if the sheet rotated or cropped it before
+-- (see sheetValues in qlab.js), as {value name, OSC address, key in the replies} lists.
+on oscValuesOf(entry)
+  set found to {}
+  if (item 2 of entry) is not in {"Video", "Camera"} then return found
+  set cueID to item 1 of entry
+  if (item 6 of entry) contains "rotation=" then set end of found to {"rotation", "/cue_id/" & cueID & "/quaternion", cueID}
+  if (item 6 of entry) contains "crop=" then set end of found to {"crop", "/cue_id/" & cueID & "/crop", "crop:" & cueID}
+  return found
+end oscValuesOf
+
+-- Adds the rotation and the crop of each video and camera cue that the sheet rotated or cropped before to its values in
+-- scanned, read with OSC (AppleScript can't).
+on readOscValues()
   set oscWords to {}
   repeat with i from 1 to count of scanned
-    set entry to item i of scanned
-    if (item 6 of entry) contains "rotation=" and (item 2 of entry) is in {"Video", "Camera"} then
-      set end of oscWords to "/cue_id/" & (item 1 of entry) & "/quaternion"
+    repeat with v in my oscValuesOf(item i of scanned)
+      set end of oscWords to item 2 of v
       set end of oscWords to ";"
-    end if
+    end repeat
   end repeat
   if oscWords is {} then return
   repeat 2 times
     set replyLines to my oscRun(oscWords)
     set allRead to true
     repeat with i from 1 to count of scanned
-      if (item 6 of item i of scanned) contains "rotation=" and (item 2 of item i of scanned) is in {"Video", "Camera"} then
-        if my rotationIn(replyLines, item 1 of item i of scanned) is "" then set allRead to false
-      end if
+      repeat with v in my oscValuesOf(item i of scanned)
+        if my oscValueIn(replyLines, item 3 of v) is "" then set allRead to false
+      end repeat
     end repeat
     if allRead or oscAsked then exit repeat
     my askPasscode()
   end repeat
   repeat with i from 1 to count of scanned
-    set r to my rotationIn(replyLines, item 1 of item i of scanned)
-    if r is not "" then set end of item 8 of item i of scanned to {"rotation", r}
+    repeat with v in my oscValuesOf(item i of scanned)
+      set r to my oscValueIn(replyLines, item 3 of v)
+      if r is not "" then set end of item 8 of item i of scanned to {item 1 of v, r}
+    end repeat
   end repeat
-end readRotations
+end readOscValues
 
 -- Rotates a video or camera cue around the Z axis: Geometry mode "Custom" (fill stage off) with AppleScript, the
 -- rotation with OSC (AppleScript can't), and reads it back to check. Returns a problem, or "" if it worked.
@@ -1358,7 +1407,7 @@ on setRotation(c, v)
   set oscWords to {"/cue_id/" & cueID & "/resetRotation", ";", "/cue_id/" & cueID & "/rotate/z", "f:" & v, ";", "/cue_id/" & cueID & "/quaternion"}
   repeat 2 times
     try
-      set r to my rotationIn(my oscRun(oscWords), cueID)
+      set r to my oscValueIn(my oscRun(oscWords), cueID)
     on error e
       return "can't rotate it with OSC (" & e & ")"
     end try
@@ -1368,6 +1417,34 @@ on setRotation(c, v)
   end repeat
   return "QLab didn't rotate it to " & v & " degrees (is OSC allowed, with Edit permission? see Workspace Settings > Network > OSC Access)"
 end setRotation
+
+-- Crops a video or camera cue by "<top>/<bottom>/<left>/<right>" pixels with OSC (AppleScript can't), in Geometry mode
+-- "Custom" unless it removes the crop, and reads it back to check. Returns a problem, or "" if it worked.
+on setCrop(c, v)
+  tell application id "com.figure53.QLab.5"
+    set cueID to uniqueID of c
+    if v is not "0/0/0/0" then
+      try
+        set fill stage of c to false
+      end try
+    end if
+  end tell
+  set AppleScript's text item delimiters to "/"
+  set edges to text items of v
+  set AppleScript's text item delimiters to ""
+  set oscWords to {"/cue_id/" & cueID & "/crop", "f:" & item 1 of edges, "f:" & item 2 of edges, "f:" & item 3 of edges, "f:" & item 4 of edges, ";", "/cue_id/" & cueID & "/crop"}
+  repeat 2 times
+    try
+      set r to my oscValueIn(my oscRun(oscWords), "crop:" & cueID)
+    on error e
+      return "can't crop it with OSC (" & e & ")"
+    end try
+    if r is v then return ""
+    if oscAsked then exit repeat
+    my askPasscode()
+  end repeat
+  return "QLab didn't crop it to " & v & " (top/bottom/left/right; is OSC allowed, with Edit permission? see Workspace Settings > Network > OSC Access)"
+end setCrop
 
 -- Puts a video cue in Fill Stage with a style: fit, fill or stretch. The style is set with a script compiled when it
 -- runs, so that a style QLab doesn't know (e.g. on a camera cue) is a problem with that cue, not an error that stops the
@@ -1389,6 +1466,7 @@ end setFillStyle
 -- Sets one value the sheet controls. Returns a problem, or "" if it worked.
 on setValue(c, n, v)
   if n is "rotation" then return my setRotation(c, v)
+  if n is "crop" then return my setCrop(c, v)
   if n is "file" then
     set f to mediaPath & "/" & v
     try
@@ -1711,10 +1789,10 @@ end if
 -- there. The page is saved next to the workspace (or on the Desktop), and saved again with the result, as a log.
 my scanCues(theList)
 try
-  my readRotations()
+  my readOscValues()
 on error e
   activate
-  display dialog "The script can't read the rotations of the cues with OSC (" & e & ")." & return & return & "If you continue, the sheet's rotations are set only where the sheet changed them." buttons {"Cancel", "Continue"} default button 2 cancel button 1 with icon caution
+  display dialog "The script can't read the rotations and crops of the cues with OSC (" & e & ")." & return & return & "If you continue, the sheet's rotations and crops are set only where the sheet changed them." buttons {"Cancel", "Continue"} default button 2 cancel button 1 with icon caution
 end try
 set mediaFiles to {}
 set filesKnown to false
