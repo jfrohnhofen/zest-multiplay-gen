@@ -22,9 +22,9 @@ const MULTIPLAY_AUTO_APPEARANCE = { $BGColour: "202020", $FontColour: "FFFFFF" }
  * Each sheet row becomes one or multiple lines (LX, SX, VX, ...), chained to start together. How a row starts depends on its
  * trigger (see schedule.js):
  * - `go`: the first line is a manual cue the operator triggers. Rows of the same block follow in the same chain.
- * - `continue +N`: its lines are chained after the head's, with a pre-wait so that they start N s after the head's GO.
- *   A pre-wait counts from the start of the previous cue of the chain, so the chain stores the differences between
- *   the offsets of consecutive rows (offsets of a block must not decrease).
+ * - `continue +N`: its lines are chained after the head's, with a pre-wait of N s so that they start N s after the head's GO.
+ *   MultiPlay fires all cues of a chain at the same moment, so the pre-wait is the offset from the head, not the
+ *   difference to the previous row.
  * - `follow #sound +N`: its lines are chained right after the labeled sound, whose advance is follow-on-end, with a
  *   pre-wait of N s. A cue starts one successor only, so the labeled sound has to be the last cue of its chain.
  */
@@ -56,14 +56,13 @@ function generateMultiplay(cues) {
   const list = [];
   const layoutChain = rows => {
     rows = rows.filter(row => rowLines.get(row)?.length > 0);
-    let previousOffset = 0;
     for (const [i, row] of rows.entries()) {
       const lines = rowLines.get(row);
-      const delay = row.trigger.offset - previousOffset;
-      previousOffset = row.trigger.offset;
       lines[0].isFirst = true;
-      lines[0].preWait = delay;
       for (const [k, line] of lines.entries()) {
+        // All cues of a chain are fired at the same moment (the chain's trigger), so every cue waits for the full
+        // offset from the head, not for the difference to the previous cue.
+        line.preWait = row.trigger.offset;
         const isLast = i === rows.length - 1 && k === lines.length - 1;
         line.advance = isLast ? MULTIPLAY_ADVANCE.MANUAL : MULTIPLAY_ADVANCE.WITH;
         list.push(line);
@@ -105,10 +104,10 @@ function generateMultiplay(cues) {
     const xml = { ...line.xml };
     const isGo = cue.trigger.kind === "go";
     if (xml.Control && typeof xml.Control.$Target === "object") {
-      xml.Control = { ...xml.Control, $Target: xml.Control.$Target.uid };
+      xml.Control = deepMerge(xml.Control, { $Target: xml.Control.$Target.uid });
     }
     if (line.preWait > 0) {
-      xml.Wait = { ...xml.Wait, $Pre: Math.round(line.preWait * 1000) };
+      xml.Wait = deepMerge(xml.Wait, { $Pre: Math.round(line.preWait * 1000) });
     }
     return {...xml, ...{
       UID: line.uid,
@@ -160,7 +159,7 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
           $AddLF: -1,
         },
         {
-          $Data: `goto cue ${cue.cue}`,
+          $Data: `goto cue ${cue.cue.slice(1)}`,
           $Format: 0,
           $AddCR: -1,
           $AddLF: -1,
@@ -194,13 +193,13 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
     const duplicateLabel = hasLabel && !ctx.check(!soundLabels.has(label), `duplicate label #${label}`);
 
     if (hasValidFile) {
-      const line = addLine("SX", cue.tracks.sound.description, {...{
+      const line = addLine("SX", cue.tracks.sound.description, deepMerge({
         Type: 0,
         File: {
           $Name: `${LOCAL_FOLDER}\\sound\\${file.name}`,
         },
         AudioChannel: MULTIPLAY_SX_AUDIO_PATCH,
-      }, ...params});
+      }, params));
       if (hasLabel && !duplicateLabel) {
         soundLabels.set(label, line);
       }
@@ -226,8 +225,8 @@ function buildMultiplayLines(cue, soundLabels, ctx) {
         Msg: {
           $Data: `/cue/${cue.cue}/start`,
           $Format: 0,
-          $AddCR: 0,
-          $AddLF: 0,
+          $AddCR: -1,
+          $AddLF: -1,
         },
       }],
     });
@@ -383,8 +382,8 @@ const multiplay = XmlService.parse(`<?xml version="1.0" encoding="UTF-8"?>
   </Audio>
   <MIDI/>
   <Network>
-    <Patch Name="grandMA2" Destination="127.0.0.1" Adapter="Local Host" Port="30000" Encoding="2" Enabled="-1"/>
-    <Patch Name="QLab" Destination="192.168.0.80" Adapter="{552E5721-8042-4E9E-ADE6-FB41CBDA4E0A}" Port="53000" Encoding="1" Enabled="-1"/>
+    <Patch Name="grandMA2" Destination="192.168.0.147" Adapter="" Port="30000" Encoding="2" Enabled="-1"/>
+    <Patch Name="QLab" Destination="192.168.0.97" Adapter="" Port="53000" Encoding="1" Enabled="-1"/>
   </Network>
   <Video/>
 </Production>`);

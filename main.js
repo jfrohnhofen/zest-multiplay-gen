@@ -2,7 +2,7 @@
 const SHOW_NAME = "RENT";
 
 // Target local filesystem base directory path for show assets.
-const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\${SHOW_NAME}`;
+const LOCAL_FOLDER = `C:\\Users\\ZEST\\Desktop\\ZEST\\${SHOW_NAME}`;
 
 // Google Drive folder ID where generated output files and assets are stored.
 const OUTPUT_FOLDER = "1_yVMIcbWtE49IguFixpRchhYeve1zBwg";

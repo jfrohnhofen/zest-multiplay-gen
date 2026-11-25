@@ -124,7 +124,7 @@ Validation (errors with row numbers; no output is written):
 - A MultiPlay cue starts one successor, so a sound that has followers must be the last cue of its chain: no `continue`
   row may come after the row with that sound.
 
-MultiPlay pre-waits are stored as the difference to the previous cue of the chain (hence non-decreasing offsets).
+MultiPlay fires all cues of a chain at the same moment, so each pre-wait is the full offset from the head (or from the end of the followed sound), not the difference to the previous cue.
 Placeholder cues (`MULTIPLAY_OUTPUT_*_PLACEHOLDER_CUES`) are only added to `go` rows.
 
 Cue ids are upper-cased (`q12` becomes `Q12` in MultiPlay, QLab and the OSC addresses). In MultiPlay's cue list only the
