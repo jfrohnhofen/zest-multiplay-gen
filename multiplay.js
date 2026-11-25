@@ -113,7 +113,7 @@ function generateMultiplay(cues) {
       UID: line.uid,
       // The first line of a row is the primary cue that displays a cue number, page number, description, etc. The other
       // lines are separate cues in MultiPlay that start together with it.
-      Q: line.isFirst ? `${isGo ? "" : "[AUTO] "}${cue.cue}\tp${cue.pg || "??"}\t${cue.scene || ""}\t    ${cue.line || ""}` : "",
+      Q: line.isFirst ? `${isGo ? "" : "[AUTO] "}${cue.cue}\tp${cue.pg || "??"}\t${cue.line || ""}` : "",
       ScriptRef: line.isFirst ? cue.description : "",
       Description: line.abbr + (line.descr ? ` - ${line.descr}` : ""),
       Advance: { $Action: line.advance, $Target: 0 },
